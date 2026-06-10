@@ -1,899 +1,1885 @@
-# =============================================================================
-# Asset Management System — Complete FastAPI Backend (main.py)
-# Integrated Version: Includes Approval Workflows, Seeding, and Strict Validation
-# Run: uvicorn main:app --reload
-# Docs: http://localhost:8000/docs
-# =============================================================================
-
-import os
-from datetime import datetime, timedelta, date
-from typing import Optional, List, Any
-
-from fastapi import FastAPI, Depends, HTTPException, status, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
-
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Boolean,
-    Date, DateTime, Text, ForeignKey, func, or_
-)
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
-
-from passlib.context import CryptContext
-from jose import JWTError, jwt
-from pydantic import BaseModel, EmailStr, field_validator
-from dotenv import load_dotenv
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-load_dotenv()
-
-DATABASE_URL               = os.getenv("DATABASE_URL", "sqlite:///./asset_management.db")
-SECRET_KEY                 = os.getenv("SECRET_KEY", "change-this-in-production-use-a-long-random-string")
-ALGORITHM                  = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 24h
-
-# Fix for Render PostgreSQL dialect deployment requirement
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# =============================================================================
-# DATABASE SETUP (SQLAlchemy)
-# =============================================================================
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-
-engine       = create_engine(DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base         = declarative_base()
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# =============================================================================
-# MODELS (Database Tables)
-# =============================================================================
-
-class User(Base):
-    __tablename__ = "users"
-
-    id               = Column(Integer, primary_key=True, index=True)
-    email            = Column(String(255), unique=True, nullable=False, index=True)
-    hashed_password  = Column(String(255), nullable=False)
-    role             = Column(String(20), nullable=False, default="employee")  # admin | employee
-    is_active        = Column(Boolean, default=True)
-    created_at       = Column(DateTime, default=datetime.utcnow)
-
-    employee = relationship("Employee", back_populates="user", uselist=False)
-
-
-class Employee(Base):
-    __tablename__ = "employees"
-
-    id           = Column(Integer, primary_key=True, index=True)
-    employee_id  = Column(String(20), unique=True, nullable=False, index=True)
-    name         = Column(String(100), nullable=False)
-    email        = Column(String(255), unique=True, nullable=False)
-    department   = Column(String(100))
-    designation  = Column(String(100))
-    joining_date = Column(Date, nullable=False) 
-    user_id      = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at   = Column(DateTime, default=datetime.utcnow)
-    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    user        = relationship("User", back_populates="employee")
-    assignments = relationship("Assignment", back_populates="employee")
-
-
-class Asset(Base):
-    __tablename__ = "assets"
-
-    id            = Column(Integer, primary_key=True, index=True)
-    asset_tag     = Column(String(50), unique=True, nullable=False, index=True)
-    asset_name    = Column(String(100), nullable=False)
-    asset_type    = Column(String(50), nullable=False)
-    brand         = Column(String(100))
-    serial_number = Column(String(100), unique=True)
-    purchase_date = Column(Date, nullable=False) 
-    status        = Column(String(20), nullable=False, default="available")
-    created_at    = Column(DateTime, default=datetime.utcnow)
-    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    assignments = relationship("Assignment", back_populates="asset")
-
-
-class Assignment(Base):
-    __tablename__ = "assignments"
-
-    id            = Column(Integer, primary_key=True, index=True)
-    asset_id      = Column(Integer, ForeignKey("assets.id"), nullable=False)
-    employee_id   = Column(Integer, ForeignKey("employees.id"), nullable=False)
-    assigned_by   = Column(Integer, ForeignKey("users.id"))
-    assigned_date = Column(DateTime, default=datetime.utcnow)
-    returned_date = Column(DateTime, nullable=True)
-    is_active     = Column(Boolean, default=True)
-    notes         = Column(Text)
-
-    asset    = relationship("Asset", back_populates="assignments")
-    employee = relationship("Employee", back_populates="assignments")
-    assigner = relationship("User", foreign_keys=[assigned_by])
-
-
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
-
-    id           = Column(Integer, primary_key=True, index=True)
-    action       = Column(String(50), nullable=False)   
-    entity_type  = Column(String(50))                   
-    entity_id    = Column(Integer)
-    performed_by = Column(Integer, ForeignKey("users.id"))
-    details      = Column(Text)                         
-    created_at   = Column(DateTime, default=datetime.utcnow)
-
-
-# Create all tables
-Base.metadata.create_all(bind=engine)
-
-
-# =============================================================================
-# SECURITY UTILITIES
-# =============================================================================
-pwd_context   = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire    = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def decode_token(token: str) -> dict:
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
-
-# =============================================================================
-# AUTH DEPENDENCIES
-# =============================================================================
-
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = decode_token(token)
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-
-    user = db.query(User).filter(User.id == int(user_id)).first()
-    if user is None or not user.is_active:
-        raise credentials_exception
-    return user
-
-
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
-        )
-    return current_user
-
-
-# =============================================================================
-# AUDIT HELPER
-# =============================================================================
-
-def log_audit(
-    db: Session,
-    action: str,
-    entity_type: str,
-    entity_id: int,
-    performed_by: int,
-    details: str = ""
-):
-    log = AuditLog(
-        action=action,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        performed_by=performed_by,
-        details=details
-    )
-    db.add(log)
-
-
-# =============================================================================
-# PYDANTIC SCHEMAS (Request / Response models)
-# =============================================================================
-
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-    @field_validator("password")
-    @classmethod
-    def password_length(cls, v):
-        if len(v) < 6:
-            raise ValueError("password must be at least 6 characters")
-        return v
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    role: str
-    user_id: int
-    email: str
-
-
-class UserResponse(BaseModel):
-    id: int
-    email: str
-    role: str
-    is_active: bool
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class EmployeeCreate(BaseModel):
-    employee_id: str
-    name: str
-    email: EmailStr
-    department: Optional[str] = None
-    designation: Optional[str] = None
-    joining_date: date
-    
-    @field_validator("joining_date")
-    @classmethod
-    def validate_joining_date(cls, v):
-        if v and v > date.today():
-            raise ValueError("Joining date cannot be in the future")
-        return v
-
-
-class EmployeeUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    department: Optional[str] = None
-    designation: Optional[str] = None
-    joining_date: Optional[date] = None
-    
-    @field_validator("joining_date")
-    @classmethod
-    def validate_joining_date(cls, v):
-        if v and v > date.today():
-            raise ValueError("Joining date cannot be in the future")
-        return v
-
-
-class EmployeeResponse(BaseModel):
-    id: int
-    employee_id: str
-    name: str
-    email: str
-    department: Optional[str]
-    designation: Optional[str]
-    joining_date: date
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-VALID_STATUSES = {"available", "assigned", "under_repair", "retired"}
-
-
-class AssetCreate(BaseModel):
-    asset_tag: str
-    asset_name: str
-    asset_type: str
-    brand: Optional[str] = None
-    serial_number: Optional[str] = None
-    purchase_date: date
-    status: Optional[str] = "available"
-
-    @field_validator("status")
-    @classmethod
-    def status_valid(cls, v):
-        if v not in VALID_STATUSES:
-            raise ValueError(f"status must be one of: {', '.join(VALID_STATUSES)}")
-        return v
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AssetTrack — Asset Management System</title>
+
+<style>
+/* ── Reset & Tokens ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --c-primary:     #1565c0;
+  --c-primary-dk:  #0d47a1;
+  --c-primary-lt:  #e3f2fd;
+  --c-accent:      #f57c00;
+  --c-sidebar:     #0d1b3e;
+  --c-sidebar-txt: rgba(255,255,255,.75);
+  --c-sidebar-act: rgba(255,255,255,.13);
+  --c-bg:          #f0f2f5;
+  --c-surface:     #ffffff;
+  --c-border:      #e0e0e0;
+  --c-text:        #1a1a2e;
+  --c-muted:       #6b7280;
+  --c-success:     #2e7d32;
+  --c-success-bg:  #e8f5e9;
+  --c-warning:     #e65100;
+  --c-warning-bg:  #fff3e0;
+  --c-error:       #c62828;
+  --c-error-bg:    #ffebee;
+  --c-info:        #1565c0;
+  --c-info-bg:     #e3f2fd;
+  --r-sm:          6px;
+  --r-md:          10px;
+  --r-lg:          14px;
+  --shadow-sm:     0 1px 4px rgba(0,0,0,.08);
+  --shadow-md:     0 4px 16px rgba(0,0,0,.10);
+  --shadow-lg:     0 8px 32px rgba(0,0,0,.14);
+  --sidebar-w:     248px;
+  --topbar-h:      60px;
+  --font:          'Inter', 'Segoe UI', system-ui, sans-serif;
+  --transition:    .18s ease;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a { color: inherit; text-decoration: none; }
+button { cursor: pointer; font-family: var(--font); }
+input, select, textarea { font-family: var(--font); }
+
+/* ── App Shell ──────────────────────────────────────────────── */
+#app { display: flex; min-height: 100vh; }
+
+/* ── Auth Pages ─────────────────────────────────────────────── */
+#auth-wrapper {
+  display: none;
+  place-items: center;
+  min-height: 100vh;
+  width: 100%;
+  background: linear-gradient(135deg, #0d1b3e 0%, #1565c0 100%);
+}
+#auth-wrapper.active { display: grid; }
+
+.auth-card {
+  background: var(--c-surface);
+  border-radius: var(--r-lg);
+  padding: 40px 36px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: var(--shadow-lg);
+}
+.auth-logo { font-size: 22px; font-weight: 800; color: var(--c-primary); margin-bottom: 4px; }
+.auth-logo span { color: var(--c-accent); }
+.auth-subtitle { color: var(--c-muted); font-size: 13px; margin-bottom: 28px; }
+.auth-tab-row { display: flex; gap: 4px; margin-bottom: 24px; background: var(--c-bg); border-radius: var(--r-sm); padding: 4px; }
+.auth-tab { flex: 1; padding: 8px; border: none; background: transparent; border-radius: 5px; font-size: 13px; font-weight: 600; color: var(--c-muted); transition: var(--transition); }
+.auth-tab.active { background: var(--c-surface); color: var(--c-primary); box-shadow: var(--shadow-sm); }
+
+/* ── Sidebar ────────────────────────────────────────────────── */
+#sidebar {
+  display: none;
+  flex-direction: column;
+  width: var(--sidebar-w);
+  min-height: 100vh;
+  background: var(--c-sidebar);
+  flex-shrink: 0;
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  z-index: 100;
+  transition: transform var(--transition);
+}
+#sidebar.active { display: flex; }
+
+.sidebar-brand {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+.sidebar-brand-name { font-size: 18px; font-weight: 800; color: #fff; letter-spacing: -.3px; }
+.sidebar-brand-name span { color: #64b5f6; }
+.sidebar-user-role {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  background: rgba(255,255,255,.1);
+  color: rgba(255,255,255,.8);
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
+.sidebar-nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
+.sidebar-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: rgba(255,255,255,.35);
+  padding: 12px 10px 6px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  color: var(--c-sidebar-txt);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  margin-bottom: 2px;
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+.nav-item:hover { background: var(--c-sidebar-act); color: #fff; }
+.nav-item.active { background: var(--c-primary); color: #fff; }
+.nav-item .nav-icon { font-size: 18px; width: 22px; text-align: center; flex-shrink: 0; }
+
+.sidebar-footer {
+  padding: 12px 10px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+
+/* ── Main Layout ────────────────────────────────────────────── */
+#main-wrapper {
+  display: none;
+  flex: 1;
+  margin-left: var(--sidebar-w);
+  flex-direction: column;
+  min-height: 100vh;
+}
+#main-wrapper.active { display: flex; }
+
+.topbar {
+  height: var(--topbar-h);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-sm);
+}
+.topbar-left h2 { font-size: 16px; font-weight: 700; }
+.topbar-left p { font-size: 12px; color: var(--c-muted); }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.topbar-avatar {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: var(--c-primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+}
+.topbar-email { font-size: 13px; color: var(--c-muted); }
+
+.page-content { flex: 1; padding: 24px; }
+
+/* ── Cards & Surfaces ───────────────────────────────────────── */
+.card {
+  background: var(--c-surface);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--c-border);
+}
+.card-body { padding: 20px; }
+.card-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.card-title { font-size: 15px; font-weight: 700; }
+
+/* ── Stat Cards ─────────────────────────────────────────────── */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card { padding: 20px; border-radius: var(--r-md); background: var(--c-surface); box-shadow: var(--shadow-sm); border: 1px solid var(--c-border); display: flex; align-items: center; gap: 16px; }
+.stat-icon { width: 48px; height: 48px; border-radius: var(--r-sm); display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; }
+.stat-label { font-size: 12px; color: var(--c-muted); font-weight: 500; margin-bottom: 2px; }
+.stat-value { font-size: 28px; font-weight: 800; line-height: 1; }
+
+/* ── Tables ─────────────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+thead tr { background: #f8fafc; }
+th { padding: 10px 14px; text-align: left; font-size: 11.5px; font-weight: 700; color: var(--c-muted); text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--c-border); white-space: nowrap; }
+td { padding: 12px 14px; font-size: 13.5px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+tbody tr:hover { background: #fafbff; }
+tbody tr:last-child td { border-bottom: none; }
+
+/* ── Badges / Status Chips ──────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.badge-available   { background: var(--c-success-bg); color: var(--c-success); }
+.badge-assigned    { background: var(--c-warning-bg); color: var(--c-warning); }
+.badge-under_repair{ background: #fce4ec; color: #c62828; }
+.badge-retired     { background: #f5f5f5; color: #616161; }
+.badge-admin       { background: #ede7f6; color: #4527a0; }
+.badge-employee    { background: var(--c-info-bg); color: var(--c-info); }
+
+/* ── Buttons ─────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 18px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.btn-primary  { background: var(--c-primary); color: #fff; }
+.btn-primary:hover { background: var(--c-primary-dk); }
+.btn-outline  { background: transparent; color: var(--c-primary); border: 1.5px solid var(--c-primary); }
+.btn-outline:hover { background: var(--c-primary-lt); }
+.btn-danger   { background: var(--c-error-bg); color: var(--c-error); }
+.btn-danger:hover { background: #ffcdd2; }
+.btn-success  { background: var(--c-success-bg); color: var(--c-success); }
+.btn-success:hover { background: #c8e6c9; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.btn-icon { padding: 7px; border-radius: var(--r-sm); background: transparent; border: 1.5px solid var(--c-border); color: var(--c-muted); font-size: 15px; transition: var(--transition); }
+.btn-icon:hover { background: var(--c-bg); color: var(--c-text); border-color: #bbb; }
+
+/* ── Forms ───────────────────────────────────────────────────── */
+.form-group { margin-bottom: 16px; }
+label { display: block; font-size: 12.5px; font-weight: 600; color: var(--c-muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .3px; }
+.input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1.5px solid var(--c-border);
+  border-radius: var(--r-sm);
+  font-size: 13.5px;
+  color: var(--c-text);
+  background: var(--c-surface);
+  transition: border-color var(--transition);
+  outline: none;
+}
+.input:focus { border-color: var(--c-primary); box-shadow: 0 0 0 3px rgba(21,101,192,.1); }
+.input:disabled { background: #f5f5f5; color: var(--c-muted); }
+select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'%3E%3Cpath fill='%236b7280' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 32px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.input-err { border-color: var(--c-error); }
+.err-msg { color: var(--c-error); font-size: 11.5px; margin-top: 4px; }
+
+/* ── Search & Toolbar ───────────────────────────────────────── */
+.toolbar { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--c-border); flex-wrap: wrap; }
+.search-box { position: relative; flex: 1; min-width: 200px; max-width: 340px; }
+.search-box .input { padding-left: 34px; }
+.search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); font-size: 15px; color: var(--c-muted); pointer-events: none; }
+.toolbar-right { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+
+/* ── Pagination ──────────────────────────────────────────────── */
+.pagination { display: flex; align-items: center; gap: 6px; padding: 14px 20px; border-top: 1px solid var(--c-border); justify-content: flex-end; flex-wrap: wrap; }
+.pagination .btn-icon { min-width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.pagination .btn-icon.active { background: var(--c-primary); color: #fff; border-color: var(--c-primary); }
+.page-info { font-size: 12.5px; color: var(--c-muted); margin-right: 8px; }
+
+/* ── Modal ───────────────────────────────────────────────────── */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.5);
+  z-index: 200;
+  place-items: center;
+  backdrop-filter: blur(2px);
+}
+.modal-overlay.open { display: grid; }
+
+.modal {
+  background: var(--c-surface);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: slideUp .2s ease;
+}
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+.modal-header {
+  padding: 20px 24px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.modal-title { font-size: 17px; font-weight: 700; }
+.modal-close {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: var(--c-bg);
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-muted);
+  cursor: pointer;
+}
+.modal-close:hover { background: var(--c-border); color: var(--c-text); }
+.modal-body { padding: 20px 24px; }
+.modal-footer { padding: 0 24px 20px; display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ── Alert / Toast ───────────────────────────────────────────── */
+#toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  font-size: 13.5px;
+  font-weight: 500;
+  max-width: 320px;
+  animation: toastIn .25s ease;
+  cursor: pointer;
+}
+@keyframes toastIn {
+  from { transform: translateX(60px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.toast-success { background: var(--c-success-bg); color: var(--c-success); border: 1px solid #a5d6a7; }
+.toast-error   { background: var(--c-error-bg);   color: var(--c-error);   border: 1px solid #ef9a9a; }
+.toast-info    { background: var(--c-info-bg);    color: var(--c-info);    border: 1px solid #90caf9; }
+
+/* ── Empty / Loading States ─────────────────────────────────── */
+.empty-state { text-align: center; padding: 60px 20px; color: var(--c-muted); }
+.empty-state .empty-icon { font-size: 48px; margin-bottom: 12px; opacity: .4; }
+.empty-state p { font-size: 14px; }
+.loading-row td { text-align: center; padding: 40px; }
+.spinner { display: inline-block; width: 32px; height: 32px; border: 3px solid var(--c-border); border-top-color: var(--c-primary); border-radius: 50%; animation: spin .6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Confirm Dialog ─────────────────────────────────────────── */
+.confirm-modal { max-width: 380px; }
+.confirm-icon { font-size: 36px; text-align: center; margin-bottom: 10px; }
+.confirm-msg { text-align: center; color: var(--c-muted); font-size: 14px; }
+
+/* ── Dashboard ───────────────────────────────────────────────── */
+.dash-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .dash-grid { grid-template-columns: 1fr; } }
+.recent-table td, .recent-table th { padding: 9px 14px; }
+
+/* ── Detail Rows ─────────────────────────────────────────────── */
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 24px; }
+.detail-item label { font-size: 11px; color: var(--c-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px; }
+.detail-item p { font-size: 14px; color: var(--c-text); font-weight: 500; }
+
+/* ── Misc ────────────────────────────────────────────────────── */
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.page-header h1 { font-size: 22px; font-weight: 800; }
+.page-header p { font-size: 13px; color: var(--c-muted); margin-top: 2px; }
+.divider { height: 1px; background: var(--c-border); margin: 16px 0; }
+.text-muted { color: var(--c-muted); }
+.mt-16 { margin-top: 16px; }
+.flex { display: flex; }
+.items-center { align-items: center; }
+.gap-8 { gap: 8px; }
+.w-full { width: 100%; }
+.text-center { text-align: center; }
+</style>
+</head>
+
+<body>
+<div id="auth-wrapper">
+  <div class="auth-card">
+    <div class="auth-logo">Asset<span>Track</span></div>
+    <p class="auth-subtitle">Company Asset Management System</p>
+
+    <div class="auth-tab-row">
+      <button class="auth-tab active" onclick="showAuthTab('login')">Sign In</button>
+      <button class="auth-tab" onclick="showAuthTab('register')">Register</button>
+    </div>
+
+    <div id="tab-login">
+      <div class="form-group">
+        <label>Email Address</label>
+        <input id="login-email" class="input" type="email" placeholder="admin@company.com" autocomplete="email" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input id="login-password" class="input" type="password" placeholder="Your password" autocomplete="current-password" />
+      </div>
+      <div id="login-err" class="err-msg" style="margin-bottom:10px;display:none"></div>
+      <button class="btn btn-primary w-full" style="justify-content:center;padding:11px" onclick="doLogin()">
+        <span id="login-btn-text">Sign In</span>
+      </button>
+      <p style="text-align:center;font-size:12px;color:var(--c-muted);margin-top:16px">
+        <strong>Demo:</strong> admin@demo.com / admin123
+      </p>
+    </div>
+
+    <div id="tab-register" style="display:none">
+      <div class="form-group">
+        <label>Email Address</label>
+        <input id="reg-email" class="input" type="email" placeholder="you@company.com" />
+      </div>
+      <div class="form-group">
+        <label>Password (min 6 chars)</label>
+        <input id="reg-password" class="input" type="password" placeholder="Create a password" />
+      </div>
+      <div id="reg-err" class="err-msg" style="margin-bottom:10px;display:none"></div>
+      <button class="btn btn-primary w-full" style="justify-content:center;padding:11px" onclick="doRegister()">
+        Create Account
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="sidebar">
+  <div class="sidebar-brand">
+    <div class="sidebar-brand-name">Asset<span>Track</span></div>
+    <div class="sidebar-user-role" id="user-role-badge">—</div>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="sidebar-section-label">Main</div>
+    <button class="nav-item active" onclick="navigate('dashboard')" data-page="dashboard">
+      <span class="nav-icon">📊</span> Dashboard
+    </button>
+    <div class="sidebar-section-label">Management</div>
+    <button class="nav-item" onclick="navigate('employees')" data-page="employees">
+      <span class="nav-icon">👥</span> Employees
+    </button>
+    <div class="sidebar-section-label" id="admin-workflow-label" style="display:none">Workflows</div>
+    <button class="nav-item" onclick="navigate('approvals')" data-page="approvals" id="approvals-nav" style="display:none">
+      <span class="nav-icon">⏳</span> Pending Approvals
+    </button>
+    <button class="nav-item" onclick="navigate('assets')" data-page="assets">
+      <span class="nav-icon">💻</span> Assets
+    </button>
+    <button class="nav-item" onclick="navigate('assignments')" data-page="assignments">
+      <span class="nav-icon">🔗</span> Assignments
+    </button>
+    <div class="sidebar-section-label">Account</div>
+    <button class="nav-item" onclick="navigate('profile')" data-page="profile">
+      <span class="nav-icon">👤</span> Profile
+    </button>
+    <div class="sidebar-section-label" id="audit-section" style="display:none">Admin</div>
+    <button class="nav-item" onclick="navigate('auditlogs')" data-page="auditlogs" id="audit-nav" style="display:none">
+      <span class="nav-icon">📋</span> Audit Logs
+    </button>
+  </nav>
+  <div class="sidebar-footer">
+    <button class="nav-item" onclick="logout()" style="color:#ef9a9a">
+      <span class="nav-icon">🚪</span> Logout
+    </button>
+  </div>
+</div>
+
+<div id="main-wrapper">
+  <header class="topbar">
+    <div class="topbar-left">
+      <h2 id="topbar-title">Dashboard</h2>
+      <p id="topbar-subtitle">Overview of your assets</p>
+    </div>
+    <div class="topbar-right">
+      <span class="topbar-email" id="topbar-email"></span>
+      <div class="topbar-avatar" id="topbar-avatar">A</div>
+    </div>
+  </header>
+
+  <main class="page-content">
+    <div id="page-dashboard" class="page">
+      <div class="stats-grid" id="dash-stats"></div>
+      <div class="dash-grid">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Recent Assignments</span>
+          </div>
+          <div class="table-wrap">
+            <table class="recent-table">
+              <thead><tr><th>Asset</th><th>Employee</th><th>Date</th></tr></thead>
+              <tbody id="dash-recent"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Asset Status</span></div>
+          <div class="card-body" id="dash-status-chart"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="page-employees" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <h1>Employees</h1>
+          <p>Manage company employees</p>
+        </div>
+        <button class="btn btn-primary admin-only" onclick="openEmpModal()">+ Add Employee</button>
+      </div>
+      <div class="card">
+        <div class="toolbar">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input id="emp-search" class="input" type="text" placeholder="Search by name, ID, department..." />
+          </div>
+          <div class="toolbar-right">
+            <span id="emp-count" class="text-muted" style="font-size:13px"></span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Employee ID</th><th>Name</th><th>Department</th>
+                <th>Designation</th><th>Joining Date</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="emp-table-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="emp-pagination"></div>
+      </div>
+    </div>
+
+    <div id="page-assets" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <h1>Assets</h1>
+          <p>Track and manage all company assets</p>
+        </div>
+        <button class="btn btn-primary admin-only" onclick="openAssetModal()">+ Add Asset</button>
+      </div>
+      <div class="card">
+        <div class="toolbar">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input id="asset-search" class="input" type="text" placeholder="Search by name, tag, brand..." />
+          </div>
+          <select id="asset-status-filter" class="input" style="width:160px">
+            <option value="">All Statuses</option>
+            <option value="available">Available</option>
+            <option value="assigned">Assigned</option>
+            <option value="under_repair">Under Repair</option>
+            <option value="retired">Retired</option>
+          </select>
+          <select id="asset-type-filter" class="input" style="width:140px">
+            <option value="">All Types</option>
+            <option value="Laptop">Laptop</option>
+            <option value="Phone">Phone</option>
+            <option value="Tablet">Tablet</option>
+            <option value="Monitor">Monitor</option>
+            <option value="Keyboard">Keyboard</option>
+            <option value="Mouse">Mouse</option>
+            <option value="Headset">Headset</option>
+            <option value="Chair">Chair</option>
+            <option value="Desk">Desk</option>
+            <option value="Other">Other</option>
+          </select>
+          <div class="toolbar-right">
+            <span id="asset-count" class="text-muted" style="font-size:13px"></span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Asset Tag</th><th>Name</th><th>Type</th><th>Brand</th>
+                <th>Serial No.</th><th>Status</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="asset-table-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="asset-pagination"></div>
+      </div>
+    </div>
+
+    <div id="page-assignments" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <h1>Assignments</h1>
+          <p>Assign and return company assets</p>
+        </div>
+        <button class="btn btn-primary admin-only" onclick="openAssignModal()">+ Assign Asset</button>
+      </div>
+
+      <div style="display:flex;gap:12px;margin-bottom:16px">
+        <button class="btn btn-outline" onclick="showAssignTab('active')" id="tab-active-btn">Active (0)</button>
+        <button class="btn btn-outline" onclick="showAssignTab('history')" id="tab-hist-btn">All History</button>
+      </div>
+
+      <div class="card" id="assign-active-panel">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Asset Tag</th><th>Asset Name</th><th>Employee</th><th>Dept</th><th>Assigned On</th><th>Notes</th><th>Actions</th></tr></thead>
+            <tbody id="assign-active-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="assign-active-pagination"></div>
+      </div>
+
+      <div class="card" id="assign-hist-panel" style="display:none">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Asset Tag</th><th>Asset Name</th><th>Employee</th><th>Assigned</th><th>Returned</th><th>Status</th></tr></thead>
+            <tbody id="assign-hist-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="assign-hist-pagination"></div>
+      </div>
+    </div>
+
+    <div id="page-profile" class="page" style="display:none">
+      <div class="page-header"><div><h1>Profile</h1><p>Your account details</p></div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
         
-    @field_validator("purchase_date")
-    @classmethod
-    def validate_purchase_date(cls, v):
-        if v:
-            today = date.today()
-            # Calculate roughly 10 years ago considering leap years safely
-            ten_years_ago = date(today.year - 10, today.month, today.day)
-            if v > today:
-                raise ValueError("Purchase date cannot be in the future")
-            if v < ten_years_ago:
-                raise ValueError("Purchase date cannot be more than 10 years old")
-        return v
-
-
-class AssetUpdate(BaseModel):
-    asset_name: Optional[str] = None
-    asset_type: Optional[str] = None
-    brand: Optional[str] = None
-    serial_number: Optional[str] = None
-    purchase_date: Optional[date] = None
-    status: Optional[str] = None
-
-    @field_validator("status")
-    @classmethod
-    def status_valid(cls, v):
-        if v and v not in VALID_STATUSES:
-            raise ValueError(f"status must be one of: {', '.join(VALID_STATUSES)}")
-        return v
+        <div class="card card-body">
+          <div style="font-size:52px;text-align:center;margin-bottom:12px">👤</div>
+          <div id="profile-info" class="detail-grid"></div>
+        </div>
         
-    @field_validator("purchase_date")
-    @classmethod
-    def validate_purchase_date(cls, v):
-        if v:
-            today = date.today()
-            ten_years_ago = date(today.year - 10, today.month, today.day)
-            if v > today:
-                raise ValueError("Purchase date cannot be in the future")
-            if v < ten_years_ago:
-                raise ValueError("Purchase date cannot be more than 10 years old")
-        return v
+        <div class="card card-body">
+          <h3 style="font-weight:700;margin-bottom:16px">Change Password</h3>
+          <div class="form-group">
+            <label>Current Password</label>
+            <input id="old-password" class="input" type="password" placeholder="Enter current password" />
+          </div>
+          <div class="form-group">
+            <label>New Password</label>
+            <input id="new-password" class="input" type="password" placeholder="New password (min 6 chars)" />
+          </div>
+          <div class="form-group">
+            <label>Confirm Password</label>
+            <input id="confirm-password" class="input" type="password" placeholder="Confirm new password" />
+          </div>
+          <button id="update-pw-btn" class="btn btn-primary" onclick="updatePassword()">Update Password</button>
+        </div>
 
+      </div>
+    </div>
 
-class AssetResponse(BaseModel):
-    id: int
-    asset_tag: str
-    asset_name: str
-    asset_type: str
-    brand: Optional[str]
-    serial_number: Optional[str]
-    purchase_date: date
-    status: str
-    created_at: datetime
+    <div id="page-auditlogs" class="page" style="display:none">
+      <div class="page-header"><div><h1>Audit Logs</h1><p>Full activity trail</p></div></div>
+      <div class="card">
+        <div class="toolbar">
+          <select id="audit-entity-filter" class="input" style="width:140px">
+            <option value="">All Entities</option>
+            <option value="asset">Asset</option>
+            <option value="employee">Employee</option>
+          </select>
+          <select id="audit-action-filter" class="input" style="width:140px">
+            <option value="">All Actions</option>
+            <option value="created">Created</option>
+            <option value="updated">Updated</option>
+            <option value="deleted">Deleted</option>
+            <option value="assigned">Assigned</option>
+            <option value="returned">Returned</option>
+          </select>
+          <button class="btn btn-outline btn-sm" onclick="loadAuditLogs(1)">Filter</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Action</th><th>Entity</th><th>Details</th><th>Performed By</th><th>Date</th></tr></thead>
+            <tbody id="audit-table-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="audit-pagination"></div>
+      </div>
+    </div>
 
-    class Config:
-        from_attributes = True
+    <div id="page-approvals" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <h1>Registration Approvals</h1>
+          <p>Verify applicant records before authorizing corporate system access</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Account Email</th><th>Requested Privilege</th><th>Registration Date</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="approvals-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
 
+<div class="modal-overlay" id="emp-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="emp-modal-title">Add Employee</span>
+      <button class="modal-close" onclick="closeModal('emp-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="emp-edit-id" />
+      <div class="form-row">
+        <div class="form-group">
+          <label>Employee ID *</label>
+          <input id="emp-id-field" class="input" placeholder="EMP001" />
+        </div>
+        <div class="form-group">
+          <label>Full Name *</label>
+          <input id="emp-name" class="input" placeholder="John Smith" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Email Address *</label>
+        <input id="emp-email" class="input" type="email" placeholder="john@company.com" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Department</label>
+          <select id="emp-dept" class="input">
+            <option value="">Select Department</option>
+            <option>Engineering</option><option>HR</option><option>Finance</option>
+            <option>Marketing</option><option>Sales</option><option>Operations</option>
+            <option>Legal</option><option>IT</option><option>Management</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Designation</label>
+          <input id="emp-desig" class="input" placeholder="Software Developer" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Joining Date *</label>
+        <input id="emp-joining" class="input" type="date" />
+      </div>
+      <div id="emp-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('emp-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEmployee()" id="emp-save-btn">Save Employee</button>
+    </div>
+  </div>
+</div>
 
-class AssignRequest(BaseModel):
-    asset_id: int
-    employee_id: int
-    notes: Optional[str] = None
+<div class="modal-overlay" id="asset-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="asset-modal-title">Add Asset</span>
+      <button class="modal-close" onclick="closeModal('asset-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="asset-edit-id" />
+      <div class="form-row">
+        <div class="form-group">
+          <label>Asset Tag *</label>
+          <input id="asset-tag" class="input" placeholder="AST001" />
+        </div>
+        <div class="form-group">
+          <label>Asset Name *</label>
+          <input id="asset-name" class="input" placeholder="Dell Laptop XPS 15" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Asset Type *</label>
+          <select id="asset-type" class="input">
+            <option value="">Select Type</option>
+            <option>Laptop</option><option>Phone</option><option>Tablet</option>
+            <option>Monitor</option><option>Keyboard</option><option>Mouse</option>
+            <option>Headset</option><option>Chair</option><option>Desk</option><option>Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Brand</label>
+          <input id="asset-brand" class="input" placeholder="Dell, Apple, HP..." />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Serial Number</label>
+          <input id="asset-serial" class="input" placeholder="SN-12345678" />
+        </div>
+        <div class="form-group">
+          <label>Purchase Date *</label>
+          <input id="asset-purchase-date" class="input" type="date" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Status</label>
+        <select id="asset-status" class="input">
+          <option value="available">Available</option>
+          <option value="under_repair">Under Repair</option>
+          <option value="retired">Retired</option>
+        </select>
+      </div>
+      <div id="asset-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('asset-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAsset()">Save Asset</button>
+    </div>
+  </div>
+</div>
 
+<div class="modal-overlay" id="assign-modal">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <span class="modal-title">Assign Asset to Employee</span>
+      <button class="modal-close" onclick="closeModal('assign-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>Select Asset (Available Only) *</label>
+        <select id="assign-asset-select" class="input"></select>
+      </div>
+      <div class="form-group">
+        <label>Select Employee *</label>
+        <select id="assign-emp-select" class="input"></select>
+      </div>
+      <div class="form-group">
+        <label>Notes (optional)</label>
+        <textarea id="assign-notes" class="input" rows="3" placeholder="Any notes about this assignment..."></textarea>
+      </div>
+      <div id="assign-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('assign-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="doAssign()">Assign Asset</button>
+    </div>
+  </div>
+</div>
 
-class AssignmentResponse(BaseModel):
-    id: int
-    asset_id: int
-    employee_id: int
-    assigned_by: Optional[int]
-    assigned_date: datetime
-    returned_date: Optional[datetime]
-    is_active: bool
-    notes: Optional[str]
-    asset: Optional[AssetResponse] = None
-    employee: Optional[EmployeeResponse] = None
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal confirm-modal">
+    <div class="modal-body" style="text-align:center;padding:28px 24px">
+      <div class="confirm-icon" id="confirm-icon">⚠️</div>
+      <h3 id="confirm-title" style="font-weight:700;margin-bottom:8px"></h3>
+      <p class="confirm-msg" id="confirm-message"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('confirm-modal')">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok-btn">Confirm</button>
+    </div>
+  </div>
+</div>
 
-    class Config:
-        from_attributes = True
+<div class="modal-overlay" id="approval-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Approve & Provision Profile</span>
+      <button class="modal-close" onclick="closeModal('approval-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="approve-user-id" />
+      <div class="form-row">
+        <div class="form-group">
+          <label>Assign Employee ID *</label>
+          <input id="approve-emp-id" class="input" placeholder="EMP101" />
+        </div>
+        <div class="form-group">
+          <label>Full Name *</label>
+          <input id="approve-name" class="input" placeholder="Jane Doe" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Department</label>
+          <select id="approve-dept" class="input">
+            <option value="">Select Department</option>
+            <option>Engineering</option><option>HR</option><option>Finance</option>
+            <option>Marketing</option><option>Sales</option><option>Operations</option><option>IT</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Designation</label>
+          <input id="approve-desig" class="input" placeholder="Senior Developer" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Joining Date *</label>
+          <input id="approve-joining" class="input" type="date" />
+        </div>
+        <div class="form-group">
+          <label>Assigned App Role</label>
+          <select id="approve-role" class="input">
+            <option value="employee">Employee</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+      </div>
+      <div id="approval-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('approval-modal')">Cancel</button>
+      <button class="btn btn-success" onclick="submitApproval()">Confirm Authorization</button>
+    </div>
+  </div>
+</div>
 
+<div id="toast-container"></div>
 
-class UserApprovalRequest(BaseModel):
-    employee_id: str
-    name: str
-    department: str
-    designation: str
-    joining_date: date
-    role: str
-    
-    @field_validator("joining_date")
-    @classmethod
-    def validate_joining_date(cls, v):
-        if v and v > date.today():
-            raise ValueError("Joining date cannot be in the future")
-        return v
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────
+const API = 'https://asset-managment-system.onrender.com/api';   // ← change to your deployed URL
 
+// ── STATE ─────────────────────────────────────────────────────────────────
+let currentUser  = JSON.parse(localStorage.getItem('ams_user')  || 'null');
+let authToken    = localStorage.getItem('ams_token') || '';
+let currentPage  = 'dashboard';
 
-class AuditLogResponse(BaseModel):
-    id: int
-    action: str
-    entity_type: Optional[str]
-    entity_id: Optional[int]
-    performed_by: Optional[int]
-    details: Optional[str]
-    created_at: datetime
+const empState   = { page: 1, search: '', debounceTimer: null };
+const assetState = { page: 1, search: '', status: '', type: '', debounceTimer: null };
+const assignState= { activePage: 1, histPage: 1, tab: 'active' };
+const auditState = { page: 1 };
 
-    class Config:
-        from_attributes = True
+// ── VALIDATION HELPERS ──────────────────────────────────────────────────────
+function isValidPastOrToday(dateString) {
+  if (!dateString) return false;
+  const selectedDate = new Date(dateString);
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  return selectedDate <= today;
+}
 
+function isValidPurchaseDate(dateString) {
+  if (!dateString) return false;
+  const selectedDate = new Date(dateString);
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  
+  const tenYearsAgo = new Date();
+  tenYearsAgo.setFullYear(today.getFullYear() - 10);
+  tenYearsAgo.setHours(0, 0, 0, 0);
 
-# =============================================================================
-# FASTAPI APP
-# =============================================================================
+  return selectedDate >= tenYearsAgo && selectedDate <= today;
+}
 
-app = FastAPI(title="Asset Management System", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],          
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/", tags=["Root"])
-def root():
-    return {"message": "Asset Management System API", "docs": "/docs"}
-
-
-# ── DATABASE LIFECYCLE EVENT SEEDING ─────────────────────────────────────────
-@app.on_event("startup")
-def seed_default_admin():
-    db = SessionLocal()
-    try:
-        admin_company = db.query(User).filter(User.email == "admin@company.com").first()
-        if not admin_company:
-            db.add(User(email="admin@company.com", hashed_password=hash_password("admin123"), role="admin", is_active=True))
-        
-        admin_demo = db.query(User).filter(User.email == "admin@demo.com").first()
-        if not admin_demo:
-            db.add(User(email="admin@demo.com", hashed_password=hash_password("admin123"), role="admin", is_active=True))
-            
-        db.commit()
-        print("💡 Database initialization complete: Default admin accounts verified.")
-    except Exception as e:
-        print(f"❌ Error seeding database: {e}")
-    finally:
-        db.close()
-
-
-# =============================================================================
-# AUTH ROUTES
-# =============================================================================
-
-@app.post("/api/auth/register", response_model=UserResponse, status_code=201, tags=["Authentication"])
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == payload.email).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    # 🔒 SECURITY FIX: Hardcode role to "employee". 
-    # Nobody can exploit this endpoint to sneak into an admin role.
-    user = User(
-        email=payload.email,
-        hashed_password=hash_password(payload.password),
-        role="employee", 
-        is_active=False 
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
-
-
-@app.post("/api/auth/login", response_model=TokenResponse, tags=["Authentication"])
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
-    
-    # 🔒 Truncate incoming string passwords to 72 characters to protect passlib/bcrypt crashes
-    safe_password = payload.password[:72]
-    
-    if not user or not verify_password(safe_password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account is locked. Awaiting administrator review.")
-
-    token = create_access_token({"sub": str(user.id), "role": user.role})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "role": user.role,
-        "user_id": user.id,
-        "email": user.email
+// ── HTTP HELPER ────────────────────────────────────────────────────────────
+async function api(method, path, body = null) {
+  const opts = {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
     }
+  };
+  if (body) opts.body = JSON.stringify(body);
 
+  const res = await fetch(`${API}${path}`, opts);
 
-@app.get("/api/auth/me", response_model=UserResponse, tags=["Authentication"])
-def get_me(current_user: User = Depends(get_current_user)):
-    return current_user
-
-
-@app.put("/api/auth/change-password", tags=["Authentication"])
-def change_password(payload: ChangePasswordRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    safe_old = payload.old_password[:72]
-    if not verify_password(safe_old, current_user.hashed_password):
-        raise HTTPException(status_code=400, detail="Incorrect current password")
-    
-    if len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
-        
-    current_user.hashed_password = hash_password(payload.new_password)
-    log_audit(db, "updated", "user", current_user.id, current_user.id, "User changed password")
-    db.commit()
-    return {"message": "Password updated successfully"}
-
-
-# =============================================================================
-# ADMIN WORKFLOW WORKER ROUTES 
-# =============================================================================
-
-@app.get("/api/admin/pending-users", tags=["Admin Workflows"])
-def get_pending_users(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    return db.query(User).filter(User.is_active.is_(False)).order_by(User.created_at.desc()).all()
-
-
-@app.post("/api/admin/users/{user_id}/approve", tags=["Admin Workflows"])
-def approve_user(user_id: int, payload: UserApprovalRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Registration request not found")
-    
-    if db.query(Employee).filter(Employee.employee_id == payload.employee_id).first():
-        raise HTTPException(status_code=400, detail="Employee ID already assigned to another profile")
-
-    user.is_active = True
-    user.role = payload.role
-
-    employee = Employee(
-        employee_id=payload.employee_id,
-        name=payload.name,
-        email=user.email,
-        department=payload.department,
-        designation=payload.designation,
-        joining_date=payload.joining_date,
-        user_id=user.id
-    )
-    db.add(employee)
-    log_audit(db, "approved", "user", user.id, current_user.id, f"Approved registration for {user.email} as {payload.employee_id}")
-    db.commit()
-    return {"message": "User approved and profile created successfully"}
-
-
-@app.delete("/api/admin/users/{user_id}/reject", tags=["Admin Workflows"])
-def reject_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Registration request not found")
-    
-    log_audit(db, "rejected", "user", user.id, current_user.id, f"Rejected user registration for {user.email}")
-    db.delete(user)
-    db.commit()
-    return {"message": "Registration request successfully rejected"}
-
-
-# =============================================================================
-# EMPLOYEE ROUTES
-# =============================================================================
-
-@app.get("/api/employees", tags=["Employees"])
-def list_employees(
-    search: Optional[str] = Query(None),
-    page: int  = Query(1, ge=1),
-    limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user)
-):
-    query = db.query(Employee)
-    if search:
-        query = query.filter(
-            or_(
-                Employee.name.ilike(f"%{search}%"),
-                Employee.email.ilike(f"%{search}%"),
-                Employee.employee_id.ilike(f"%{search}%"),
-                Employee.department.ilike(f"%{search}%"),
-                Employee.designation.ilike(f"%{search}%"),
-            )
-        )
-    total      = query.count()
-    employees  = query.order_by(Employee.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
-    return {"total": total, "page": page, "limit": limit, "total_pages": (total + limit - 1) // limit, "data": employees}
-
-
-@app.post("/api/employees", response_model=EmployeeResponse, status_code=201, tags=["Employees"])
-def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    if db.query(Employee).filter(Employee.employee_id == payload.employee_id).first():
-        raise HTTPException(status_code=400, detail="Employee ID already exists")
-    if db.query(Employee).filter(Employee.email == payload.email).first():
-        raise HTTPException(status_code=400, detail="Email already registered to another employee")
-
-    emp = Employee(**payload.model_dump())
-    db.add(emp)
-    log_audit(db, "created", "employee", 0, current_user.id, f"Created employee {payload.employee_id}")
-    db.commit()
-    db.refresh(emp)
-    return emp
-
-
-@app.get("/api/employees/{emp_id}", response_model=EmployeeResponse, tags=["Employees"])
-def get_employee(emp_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    emp = db.query(Employee).filter(Employee.id == emp_id).first()
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
-    return emp
-
-
-@app.put("/api/employees/{emp_id}", response_model=EmployeeResponse, tags=["Employees"])
-def update_employee(emp_id: int, payload: EmployeeUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    emp = db.query(Employee).filter(Employee.id == emp_id).first()
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
-
-    if payload.email and payload.email != emp.email:
-        if db.query(Employee).filter(Employee.email == payload.email).first():
-            raise HTTPException(status_code=400, detail="Email already in use")
-
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(emp, field, value)
-
-    emp.updated_at = datetime.utcnow()
-    log_audit(db, "updated", "employee", emp_id, current_user.id, f"Updated employee {emp.employee_id}")
-    db.commit()
-    db.refresh(emp)
-    return emp
-
-
-@app.delete("/api/employees/{emp_id}", status_code=204, tags=["Employees"])
-def delete_employee(emp_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    emp = db.query(Employee).filter(Employee.id == emp_id).first()
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
-
-    active = db.query(Assignment).filter(Assignment.employee_id == emp_id, Assignment.is_active.is_(True)).count()
-    if active > 0:
-        raise HTTPException(status_code=400, detail="Cannot delete employee with active assignments. Return assets first.")
-
-    log_audit(db, "deleted", "employee", emp_id, current_user.id, f"Deleted employee {emp.employee_id}")
-    db.delete(emp)
-    db.commit()
-
-
-# =============================================================================
-# ASSET ROUTES
-# =============================================================================
-
-@app.get("/api/assets", tags=["Assets"])
-def list_assets(
-    search: Optional[str]     = Query(None),
-    status: Optional[str]     = Query(None),
-    asset_type: Optional[str] = Query(None),
-    page: int  = Query(1, ge=1),
-    limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user)
-):
-    query = db.query(Asset)
-    if search:
-        query = query.filter(
-            or_(
-                Asset.asset_name.ilike(f"%{search}%"),
-                Asset.asset_tag.ilike(f"%{search}%"),
-                Asset.brand.ilike(f"%{search}%"),
-                Asset.serial_number.ilike(f"%{search}%"),
-                Asset.asset_type.ilike(f"%{search}%"),
-            )
-        )
-    if status:
-        if status not in VALID_STATUSES:
-            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
-        query = query.filter(Asset.status == status)
-    if asset_type:
-        query = query.filter(Asset.asset_type.ilike(f"%{asset_type}%"))
-
-    total       = query.count()
-    assets      = query.order_by(Asset.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
-    return {"total": total, "page": page, "limit": limit, "total_pages": (total + limit - 1) // limit, "data": assets}
-
-
-@app.post("/api/assets", response_model=AssetResponse, status_code=201, tags=["Assets"])
-def create_asset(payload: AssetCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    if db.query(Asset).filter(Asset.asset_tag == payload.asset_tag).first():
-        raise HTTPException(status_code=400, detail="Asset tag already exists")
-    if payload.serial_number and db.query(Asset).filter(Asset.serial_number == payload.serial_number).first():
-        raise HTTPException(status_code=400, detail="Serial number already registered")
-
-    asset = Asset(**payload.model_dump())
-    db.add(asset)
-    log_audit(db, "created", "asset", 0, current_user.id, f"Created asset {payload.asset_tag}")
-    db.commit()
-    db.refresh(asset)
-    return asset
-
-
-@app.get("/api/assets/{asset_id}", response_model=AssetResponse, tags=["Assets"])
-def get_asset(asset_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    asset = db.query(Asset).filter(Asset.id == asset_id).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    return asset
-
-
-@app.put("/api/assets/{asset_id}", response_model=AssetResponse, tags=["Assets"])
-def update_asset(asset_id: int, payload: AssetUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    asset = db.query(Asset).filter(Asset.id == asset_id).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(asset, field, value)
-
-    asset.updated_at = datetime.utcnow()
-    log_audit(db, "updated", "asset", asset_id, current_user.id, f"Updated asset {asset.asset_tag}")
-    db.commit()
-    db.refresh(asset)
-    return asset
-
-
-@app.delete("/api/assets/{asset_id}", status_code=204, tags=["Assets"])
-def delete_asset(asset_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    asset = db.query(Asset).filter(Asset.id == asset_id).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    if asset.status == "assigned":
-        raise HTTPException(status_code=400, detail="Cannot delete an assigned asset. Return it first.")
-
-    log_audit(db, "deleted", "asset", asset_id, current_user.id, f"Deleted asset {asset.asset_tag}")
-    db.delete(asset)
-    db.commit()
-
-
-# =============================================================================
-# ASSIGNMENT ROUTES
-# =============================================================================
-
-@app.post("/api/assignments/assign", response_model=AssignmentResponse, status_code=201, tags=["Assignments"])
-def assign_asset(payload: AssignRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    asset = db.query(Asset).filter(Asset.id == payload.asset_id).first()
-    if not asset or asset.status != "available":
-        raise HTTPException(status_code=400, detail="Asset is un-assignable or missing.")
-
-    employee = db.query(Employee).filter(Employee.id == payload.employee_id).first()
-    if not employee:
-        raise HTTPException(status_code=404, detail="Employee not found")
-
-    assignment = Assignment(asset_id=payload.asset_id, employee_id=payload.employee_id, assigned_by=current_user.id, notes=payload.notes)
-    asset.status = "assigned"
-    db.add(assignment)
-    log_audit(db, "assigned", "asset", payload.asset_id, current_user.id, f"Asset {asset.asset_tag} assigned to {employee.name}")
-    db.commit()
-    db.refresh(assignment)
-    return assignment
-
-
-@app.post("/api/assignments/{assignment_id}/return", response_model=AssignmentResponse, tags=["Assignments"])
-def return_asset(assignment_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    assignment = db.query(Assignment).filter(Assignment.id == assignment_id, Assignment.is_active.is_(True)).first()
-    if not assignment:
-        raise HTTPException(status_code=404, detail="Active assignment not found")
-
-    assignment.is_active     = False
-    assignment.returned_date = datetime.utcnow()
-    assignment.asset.status  = "available"
-
-    log_audit(db, "returned", "asset", assignment.asset_id, current_user.id, f"Asset {assignment.asset.asset_tag} returned by {assignment.employee.name}")
-    db.commit()
-    db.refresh(assignment)
-    return assignment
-
-
-@app.get("/api/assignments/history", tags=["Assignments"])
-def assignment_history(
-    asset_id: Optional[int]    = Query(None),
-    employee_id: Optional[int] = Query(None),
-    is_active: Optional[bool]  = Query(None),
-    page: int  = Query(1, ge=1),
-    limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user)
-):
-    # 🛠️ FIX: Add joinedload so it forcefully fetches the linked Asset and Employee data
-    query = db.query(Assignment).options(joinedload(Assignment.asset), joinedload(Assignment.employee))
-    
-    if asset_id:
-        query = query.filter(Assignment.asset_id == asset_id)
-    if employee_id:
-        query = query.filter(Assignment.employee_id == employee_id)
-    if is_active is not None:
-        query = query.filter(Assignment.is_active.is_(is_active))
-
-    total = query.count()
-    data  = query.order_by(Assignment.assigned_date.desc()).offset((page - 1) * limit).limit(limit).all()
-    return {"total": total, "page": page, "limit": limit, "data": data}
-
-
-@app.get("/api/assignments/active", tags=["Assignments"])
-def active_assignments(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    # 🛠️ FIX: Add joinedload here as well
-    query = db.query(Assignment).options(joinedload(Assignment.asset), joinedload(Assignment.employee)).filter(Assignment.is_active.is_(True))
-    
-    total = query.count()
-    data  = query.order_by(Assignment.assigned_date.desc()).offset((page - 1) * limit).limit(limit).all()
-    return {"total": total, "page": page, "limit": limit, "data": data}
-
-
-# =============================================================================
-# DASHBOARD ROUTES
-# =============================================================================
-
-@app.get("/api/dashboard/stats", tags=["Dashboard"])
-def dashboard_stats(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return {
-        "total_employees": db.query(Employee).count(),
-        "total_assets": db.query(Asset).count(),
-        "available_assets": db.query(Asset).filter(Asset.status == "available").count(),
-        "assigned_assets": db.query(Asset).filter(Asset.status == "assigned").count(),
-        "under_repair_assets": db.query(Asset).filter(Asset.status == "under_repair").count(),
-        "retired_assets": db.query(Asset).filter(Asset.status == "retired").count(),
-        "active_assignments": db.query(Assignment).filter(Assignment.is_active.is_(True)).count(),
-        "asset_type_breakdown": [{"type": r.asset_type, "count": r.count} for r in db.query(Asset.asset_type, func.count(Asset.id).label("count")).group_by(Asset.asset_type).all()],
-        "recent_assignments": [
-            {
-                "id": a.id, "asset_tag": a.asset.asset_tag, "asset_name": a.asset.asset_name,
-                "employee_name": a.employee.name, "employee_id": a.employee.employee_id, "assigned_date": a.assigned_date.isoformat(),
-            } for a in db.query(Assignment).filter(Assignment.is_active.is_(True)).order_by(Assignment.assigned_date.desc()).limit(5).all()
-        ]
+  if (res.status === 401) {
+    if (path === '/auth/login') {
+      const data = await res.json();
+      throw new Error(data?.detail || 'Invalid email or password');
     }
+    logout();
+    throw new Error('Session expired');
+  }
+  if (res.status === 204) return null;
 
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = data?.detail || `Error ${res.status}`;
+    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+  }
+  return data;
+}
 
-# =============================================================================
-# AUDIT LOG ROUTES
-# =============================================================================
+// ── TOAST ──────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const icons  = { success: '✅', error: '❌', info: 'ℹ️' };
+  const el     = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.innerHTML = `<span>${icons[type]}</span><span>${msg}</span>`;
+  el.onclick   = () => el.remove();
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
 
-@app.get("/api/audit-logs", response_model=dict, tags=["Audit Logs"])
-def get_audit_logs(
-    entity_type: Optional[str] = Query(None),
-    action: Optional[str]      = Query(None),
-    page: int  = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-    _: User = Depends(require_admin)
-):
-    query = db.query(AuditLog)
-    if entity_type:
-        query = query.filter(AuditLog.entity_type == entity_type)
-    if action:
-        query = query.filter(AuditLog.action == action)
+// ── AUTH ───────────────────────────────────────────────────────────────────
+function showAuthTab(tab) {
+  document.getElementById('tab-login').style.display    = tab === 'login'    ? '' : 'none';
+  document.getElementById('tab-register').style.display = tab === 'register' ? '' : 'none';
+  document.querySelectorAll('.auth-tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0) === (tab === 'login'));
+  });
+}
 
-    total = query.count()
-    logs  = query.order_by(AuditLog.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
-    return {"total": total, "page": page, "limit": limit, "data": logs}
+async function doLogin() {
+  const email    = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl    = document.getElementById('login-err');
+  const btnText  = document.getElementById('login-btn-text');
+  errEl.style.display = 'none';
+  btnText.textContent = 'Signing in…';
 
+  try {
+    const data = await api('POST', '/auth/login', { email, password });
+    authToken   = data.access_token;
+    currentUser = { id: data.user_id, email: data.email, role: data.role, is_active: true };
+    localStorage.setItem('ams_token', authToken);
+    localStorage.setItem('ams_user',  JSON.stringify(currentUser));
+    initApp();
+  } catch (e) {
+    errEl.textContent   = e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btnText.textContent = 'Sign In';
+  }
+}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+async function doRegister() {
+  const email    = document.getElementById('reg-email').value.trim();
+  const password = document.getElementById('reg-password').value;
+  const errEl    = document.getElementById('reg-err');
+  errEl.style.display = 'none';
+
+  if (!email || !password) {
+    errEl.textContent = 'Email and Password are required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (password.length < 6) {
+    errEl.textContent = 'Password must be at least 6 characters.';
+    errEl.style.display = 'block'; return;
+  }
+
+  try {
+    await api('POST', '/auth/register', { email, password });
+    toast('Account created! Please sign in.', 'success');
+    showAuthTab('login');
+    document.getElementById('login-email').value = email;
+  } catch (e) {
+    errEl.textContent   = e.message;
+    errEl.style.display = 'block';
+  }
+}
+
+function logout() {
+  authToken = ''; currentUser = null;
+  localStorage.removeItem('ams_token');
+  localStorage.removeItem('ams_user');
+  document.getElementById('sidebar').classList.remove('active');
+  document.getElementById('main-wrapper').classList.remove('active');
+  document.getElementById('auth-wrapper').classList.add('active');
+}
+
+// ── APP INIT ───────────────────────────────────────────────────────────────
+function initApp() {
+  document.getElementById('auth-wrapper').classList.remove('active');
+  document.getElementById('sidebar').classList.add('active');
+  document.getElementById('main-wrapper').classList.add('active');
+
+  // Topbar
+  const initials = currentUser.email.charAt(0).toUpperCase();
+  document.getElementById('topbar-avatar').textContent = initials;
+  document.getElementById('topbar-email').textContent  = currentUser.email;
+  document.getElementById('user-role-badge').textContent = currentUser.role;
+
+  // Admin-only UI
+  const isAdmin = currentUser.role === 'admin';
+  document.querySelectorAll('.admin-only').forEach(el => {
+    el.style.display = isAdmin ? '' : 'none';
+  });
+  document.getElementById('audit-section').style.display = isAdmin ? '' : 'none';
+  document.getElementById('audit-nav').style.display     = isAdmin ? '' : 'none';
+  document.getElementById('admin-workflow-label').style.display = isAdmin ? '' : 'none';
+  document.getElementById('approvals-nav').style.display         = isAdmin ? '' : 'none';
+
+  navigate('dashboard');
+}
+
+// ── NAVIGATION ─────────────────────────────────────────────────────────────
+const pageMeta = {
+  dashboard:   { title: 'Dashboard',   sub: 'Overview of your assets' },
+  employees:   { title: 'Employees',   sub: 'Manage company employees' },
+  assets:      { title: 'Assets',      sub: 'Track and manage assets' },
+  assignments: { title: 'Assignments', sub: 'Assign and return assets' },
+  profile:     { title: 'Profile',     sub: 'Your account details' },
+  auditlogs:   { title: 'Audit Logs',  sub: 'Full activity trail' },
+  approvals:   { title: 'Registration Approvals', sub: 'Verify applicant records before authorizing corporate system access' },
+};
+
+function navigate(page) {
+  currentPage = page;
+  document.querySelectorAll('.page').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+
+  const el = document.getElementById(`page-${page}`);
+  if (el) el.style.display = '';
+  const nav = document.querySelector(`[data-page="${page}"]`);
+  if (nav) nav.classList.add('active');
+
+  const meta = pageMeta[page] || { title: page, sub: '' };
+  document.getElementById('topbar-title').textContent    = meta.title;
+  document.getElementById('topbar-subtitle').textContent = meta.sub;
+
+  if      (page === 'dashboard')   loadDashboard();
+  else if (page === 'employees')   loadEmployees(1);
+  else if (page === 'assets')      loadAssets(1);
+  else if (page === 'assignments') { loadActiveAssignments(1); loadAssignmentHistory(1); }
+  else if (page === 'profile')     loadProfile();
+  else if (page === 'auditlogs')   loadAuditLogs(1);
+  else if (page === 'approvals')   loadPendingApprovals();
+}
+
+// ── DASHBOARD ──────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  try {
+    const data = await api('GET', '/dashboard/stats');
+    renderDashStats(data);
+    renderRecentAssignments(data.recent_assignments || []);
+    renderStatusChart(data);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function renderDashStats(d) {
+  const cards = [
+    { label: 'Total Employees',  value: d.total_employees,  icon: '👥', bg: '#e3f2fd', color: '#1565c0' },
+    { label: 'Total Assets',     value: d.total_assets,     icon: '💻', bg: '#ede7f6', color: '#4527a0' },
+    { label: 'Available Assets', value: d.available_assets, icon: '✅', bg: '#e8f5e9', color: '#2e7d32' },
+    { label: 'Assigned Assets',  value: d.assigned_assets,  icon: '🔗', bg: '#fff3e0', color: '#e65100' },
+    { label: 'Under Repair',     value: d.under_repair_assets, icon: '🔧', bg: '#fce4ec', color: '#c62828' },
+    { label: 'Active Assignments', value: d.active_assignments, icon: '📋', bg: '#f3e5f5', color: '#6a1b9a' },
+  ];
+  document.getElementById('dash-stats').innerHTML = cards.map(c => `
+    <div class="stat-card">
+      <div class="stat-icon" style="background:${c.bg};color:${c.color}">${c.icon}</div>
+      <div>
+        <div class="stat-label">${c.label}</div>
+        <div class="stat-value" style="color:${c.color}">${c.value}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderRecentAssignments(items) {
+  const tbody = document.getElementById('dash-recent');
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted" style="padding:30px">No recent assignments</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = items.map(a => `
+    <tr>
+      <td><strong>${a.asset_tag}</strong><br><span class="text-muted" style="font-size:12px">${a.asset_name}</span></td>
+      <td>${a.employee_name}<br><span class="text-muted" style="font-size:12px">${a.employee_id}</span></td>
+      <td>${fmtDate(a.assigned_date)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderStatusChart(d) {
+  const items = [
+    { label: 'Available',    value: d.available_assets,     color: '#2e7d32' },
+    { label: 'Assigned',     value: d.assigned_assets,      color: '#e65100' },
+    { label: 'Under Repair', value: d.under_repair_assets,  color: '#c62828' },
+    { label: 'Retired',      value: d.retired_assets,       color: '#616161' },
+  ];
+  const total = d.total_assets || 1;
+  document.getElementById('dash-status-chart').innerHTML = items.map(item => `
+    <div style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+        <span style="font-size:13px;font-weight:600">${item.label}</span>
+        <span style="font-size:13px;font-weight:700;color:${item.color}">${item.value}</span>
+      </div>
+      <div style="height:8px;background:#f0f0f0;border-radius:4px;overflow:hidden">
+        <div style="height:100%;width:${Math.round((item.value/total)*100)}%;background:${item.color};border-radius:4px;transition:.4s ease"></div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── EMPLOYEES ──────────────────────────────────────────────────────────────
+async function loadEmployees(page) {
+  empState.page = page;
+  const tbody   = document.getElementById('emp-table-body');
+  tbody.innerHTML = loadingRow(6);
+
+  try {
+    const params = new URLSearchParams({ page, limit: 10 });
+    if (empState.search) params.set('search', empState.search);
+    const data = await api('GET', `/employees?${params}`);
+    renderEmployeeTable(data);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function renderEmployeeTable(data) {
+  const tbody = document.getElementById('emp-table-body');
+  const isAdmin = currentUser.role === 'admin';
+  document.getElementById('emp-count').textContent = `${data.total} employee${data.total !== 1 ? 's' : ''}`;
+
+  if (!data.data.length) {
+    tbody.innerHTML = emptyRow(6, 'No employees found');
+    document.getElementById('emp-pagination').innerHTML = '';
+    return;
+  }
+  tbody.innerHTML = data.data.map(e => `
+    <tr>
+      <td><span style="font-family:monospace;font-size:12px;background:#f0f0f0;padding:2px 8px;border-radius:4px">${e.employee_id}</span></td>
+      <td>
+        <strong>${e.name}</strong>
+        <br><span class="text-muted" style="font-size:12px">${e.email}</span>
+      </td>
+      <td>${e.department || '<span class="text-muted">—</span>'}</td>
+      <td>${e.designation || '<span class="text-muted">—</span>'}</td>
+      <td>${e.joining_date ? fmtDate(e.joining_date) : '<span class="text-muted">—</span>'}</td>
+      <td>
+        <div style="display:flex;gap:6px">
+          ${isAdmin ? `
+            <button class="btn-icon" title="Edit" onclick="openEmpModal(${JSON.stringify(e).replace(/"/g, '&quot;')})">✏️</button>
+            <button class="btn-icon" title="Delete" onclick="confirmDeleteEmployee(${e.id}, '${e.name}')">🗑️</button>
+          ` : '<span class="text-muted" style="font-size:12px">View only</span>'}
+        </div>
+      </td>
+    </tr>
+  `).join('');
+
+  renderPagination('emp-pagination', data.page, data.total_pages, p => loadEmployees(p));
+}
+
+function openEmpModal(emp = null) {
+  document.getElementById('emp-edit-id').value    = emp?.id || '';
+  document.getElementById('emp-id-field').value   = emp?.employee_id || '';
+  document.getElementById('emp-name').value       = emp?.name || '';
+  document.getElementById('emp-email').value      = emp?.email || '';
+  document.getElementById('emp-dept').value       = emp?.department || '';
+  document.getElementById('emp-desig').value      = emp?.designation || '';
+  document.getElementById('emp-id-field').disabled = !!emp;
+  
+  // 🔒 Auto-set Joining Date to Today and make it Unselectable
+  const todayStr = new Date().toISOString().split('T')[0];
+  document.getElementById('emp-joining').value = emp?.joining_date || todayStr;
+  document.getElementById('emp-joining').disabled = true; 
+
+  document.getElementById('emp-modal-title').textContent = emp ? 'Edit Employee' : 'Add Employee';
+  document.getElementById('emp-modal-err').style.display = 'none';
+  openModal('emp-modal');
+}
+
+async function saveEmployee() {
+  const id   = document.getElementById('emp-edit-id').value;
+  const body = {
+    employee_id:  document.getElementById('emp-id-field').value.trim(),
+    name:         document.getElementById('emp-name').value.trim(),
+    email:        document.getElementById('emp-email').value.trim(),
+    department:   document.getElementById('emp-dept').value || null,
+    designation:  document.getElementById('emp-desig').value.trim() || null,
+    joining_date: document.getElementById('emp-joining').value || null,
+  };
+  const errEl = document.getElementById('emp-modal-err');
+  errEl.style.display = 'none';
+  
+  if (!body.name || !body.email || (!id && !body.employee_id)) {
+    errEl.textContent = 'Employee ID, Name, and Email are required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!body.joining_date) {
+    errEl.textContent = 'Joining Date is required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!isValidPastOrToday(body.joining_date)) {
+    errEl.textContent = 'Joining Date cannot be in the future.';
+    errEl.style.display = 'block'; return;
+  }
+
+  try {
+    if (id) {
+      const { employee_id, ...updateBody } = body;
+      await api('PUT', `/employees/${id}`, updateBody);
+      toast('Employee updated!');
+    } else {
+      await api('POST', '/employees', body);
+      toast('Employee added!');
+    }
+    closeModal('emp-modal');
+    loadEmployees(empState.page);
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  }
+}
+
+function confirmDeleteEmployee(id, name) {
+  showConfirm(
+    '🗑️', `Delete ${name}?`,
+    'This will permanently delete the employee record. This cannot be undone.',
+    async () => {
+      try {
+        await api('DELETE', `/employees/${id}`);
+        toast('Employee deleted.', 'info');
+        loadEmployees(empState.page);
+      } catch (e) { toast(e.message, 'error'); }
+    }
+  );
+}
+
+// Search debounce
+document.getElementById('emp-search').addEventListener('input', e => {
+  clearTimeout(empState.debounceTimer);
+  empState.search = e.target.value;
+  empState.debounceTimer = setTimeout(() => loadEmployees(1), 400);
+});
+
+// ── ASSETS ─────────────────────────────────────────────────────────────────
+async function loadAssets(page) {
+  assetState.page = page;
+  document.getElementById('asset-table-body').innerHTML = loadingRow(7);
+
+  try {
+    const params = new URLSearchParams({ page, limit: 10 });
+    if (assetState.search) params.set('search',     assetState.search);
+    if (assetState.status) params.set('status',     assetState.status);
+    if (assetState.type)   params.set('asset_type', assetState.type);
+    const data = await api('GET', `/assets?${params}`);
+    renderAssetTable(data);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function renderAssetTable(data) {
+  const tbody   = document.getElementById('asset-table-body');
+  const isAdmin = currentUser.role === 'admin';
+  document.getElementById('asset-count').textContent = `${data.total} asset${data.total !== 1 ? 's' : ''}`;
+
+  if (!data.data.length) {
+    tbody.innerHTML = emptyRow(7, 'No assets found');
+    document.getElementById('asset-pagination').innerHTML = '';
+    return;
+  }
+  tbody.innerHTML = data.data.map(a => `
+    <tr>
+      <td><span style="font-family:monospace;font-size:12px;background:#f0f0f0;padding:2px 8px;border-radius:4px">${a.asset_tag}</span></td>
+      <td><strong>${a.asset_name}</strong></td>
+      <td>${a.asset_type}</td>
+      <td>${a.brand || '<span class="text-muted">—</span>'}</td>
+      <td style="font-family:monospace;font-size:12px">${a.serial_number || '<span class="text-muted">—</span>'}</td>
+      <td>${statusBadge(a.status)}</td>
+      <td>
+        <div style="display:flex;gap:6px">
+          ${isAdmin ? `
+            <button class="btn-icon" title="Edit" onclick="openAssetModal(${JSON.stringify(a).replace(/"/g, '&quot;')})">✏️</button>
+            <button class="btn-icon" title="Delete" onclick="confirmDeleteAsset(${a.id}, '${a.asset_name}')">🗑️</button>
+          ` : '<span class="text-muted" style="font-size:12px">View only</span>'}
+        </div>
+      </td>
+    </tr>
+  `).join('');
+  renderPagination('asset-pagination', data.page, data.total_pages, p => loadAssets(p));
+}
+
+function openAssetModal(asset = null) {
+  document.getElementById('asset-edit-id').value     = asset?.id || '';
+  document.getElementById('asset-tag').value         = asset?.asset_tag || '';
+  document.getElementById('asset-name').value        = asset?.asset_name || '';
+  document.getElementById('asset-type').value        = asset?.asset_type || '';
+  document.getElementById('asset-brand').value       = asset?.brand || '';
+  document.getElementById('asset-serial').value      = asset?.serial_number || '';
+  document.getElementById('asset-purchase-date').value = asset?.purchase_date || '';
+  document.getElementById('asset-status').value      = asset?.status || 'available';
+  document.getElementById('asset-tag').disabled      = !!asset;
+  document.getElementById('asset-modal-title').textContent = asset ? 'Edit Asset' : 'Add Asset';
+  document.getElementById('asset-modal-err').style.display = 'none';
+  openModal('asset-modal');
+}
+
+async function saveAsset() {
+  const id   = document.getElementById('asset-edit-id').value;
+  const body = {
+    asset_tag:     document.getElementById('asset-tag').value.trim(),
+    asset_name:    document.getElementById('asset-name').value.trim(),
+    asset_type:    document.getElementById('asset-type').value,
+    brand:         document.getElementById('asset-brand').value.trim() || null,
+    serial_number: document.getElementById('asset-serial').value.trim() || null,
+    purchase_date: document.getElementById('asset-purchase-date').value || null,
+    status:        document.getElementById('asset-status').value,
+  };
+  
+  const errEl = document.getElementById('asset-modal-err');
+  const saveBtn = document.querySelector('#asset-modal .btn-primary');
+  
+  errEl.style.display = 'none';
+
+  if (!body.asset_name || !body.asset_type || (!id && !body.asset_tag)) {
+    errEl.textContent = 'Asset Tag, Name and Type are required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!body.purchase_date) {
+    errEl.textContent = 'Purchase Date is required.';
+    errEl.style.display = 'block'; return;
+  }
+  
+  // 🔒 Enforce 10-Year Purchase Rule
+  if (!isValidPurchaseDate(body.purchase_date)) {
+    errEl.textContent = 'Purchase Date cannot be in the future or older than 10 years.';
+    errEl.style.display = 'block'; return;
+  }
+
+  saveBtn.textContent = 'Saving...';
+  saveBtn.disabled = true;
+
+  try {
+    if (id) {
+      const { asset_tag, ...updateBody } = body;
+      await api('PUT', `/assets/${id}`, updateBody);
+      toast('Asset updated!');
+    } else {
+      await api('POST', '/assets', body);
+      toast('Asset added!');
+    }
+    closeModal('asset-modal');
+    loadAssets(assetState.page);
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  } finally {
+    saveBtn.textContent = 'Save Asset';
+    saveBtn.disabled = false;
+  }
+}
+
+function confirmDeleteAsset(id, name) {
+  showConfirm(
+    '🗑️', `Delete "${name}"?`,
+    'This will permanently delete the asset record.',
+    async () => {
+      try {
+        await api('DELETE', `/assets/${id}`);
+        toast('Asset deleted.', 'info');
+        loadAssets(assetState.page);
+      } catch (e) { toast(e.message, 'error'); }
+    }
+  );
+}
+
+// Asset search & filters
+document.getElementById('asset-search').addEventListener('input', e => {
+  clearTimeout(assetState.debounceTimer);
+  assetState.search = e.target.value;
+  assetState.debounceTimer = setTimeout(() => loadAssets(1), 400);
+});
+document.getElementById('asset-status-filter').addEventListener('change', e => {
+  assetState.status = e.target.value; loadAssets(1);
+});
+document.getElementById('asset-type-filter').addEventListener('change', e => {
+  assetState.type = e.target.value; loadAssets(1);
+});
+
+// ── ASSIGNMENTS ─────────────────────────────────────────────────────────────
+function showAssignTab(tab) {
+  assignState.tab = tab;
+  document.getElementById('assign-active-panel').style.display = tab === 'active'  ? '' : 'none';
+  document.getElementById('assign-hist-panel').style.display   = tab === 'history' ? '' : 'none';
+  document.getElementById('tab-active-btn').className = 'btn ' + (tab === 'active'  ? 'btn-primary' : 'btn-outline');
+  document.getElementById('tab-hist-btn').className   = 'btn ' + (tab === 'history' ? 'btn-primary' : 'btn-outline');
+}
+
+async function loadActiveAssignments(page) {
+  assignState.activePage = page;
+  document.getElementById('assign-active-body').innerHTML = loadingRow(7);
+  try {
+    const data = await api('GET', `/assignments/active?page=${page}&limit=10`);
+    document.getElementById('tab-active-btn').textContent = `Active (${data.total})`;
+    renderActiveAssignments(data);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function renderActiveAssignments(data) {
+  const tbody   = document.getElementById('assign-active-body');
+  const isAdmin = currentUser.role === 'admin';
+  if (!data.data.length) {
+    tbody.innerHTML = emptyRow(7, 'No active assignments');
+    document.getElementById('assign-active-pagination').innerHTML = '';
+    return;
+  }
+  tbody.innerHTML = data.data.map(a => `
+    <tr>
+      <td><span style="font-family:monospace;font-size:12px;background:#f0f0f0;padding:2px 8px;border-radius:4px">${a.asset?.asset_tag || '—'}</span></td>
+      <td>${a.asset?.asset_name || '—'}</td>
+      <td><strong>${a.employee?.name || '—'}</strong><br><span class="text-muted" style="font-size:12px">${a.employee?.employee_id || ''}</span></td>
+      <td>${a.employee?.department || '<span class="text-muted">—</span>'}</td>
+      <td>${fmtDate(a.assigned_date)}</td>
+      <td>${a.notes ? `<span title="${a.notes}">${a.notes.substring(0,30)}${a.notes.length>30?'…':''}</span>` : '<span class="text-muted">—</span>'}</td>
+      <td>
+        ${isAdmin ? `<button class="btn btn-success btn-sm" onclick="confirmReturn(${a.id}, '${a.asset?.asset_name}', '${a.employee?.name}')">↩ Return</button>` : '<span class="text-muted">View only</span>'}
+      </td>
+    </tr>
+  `).join('');
+  renderPagination('assign-active-pagination', data.page, Math.ceil(data.total/10), p => loadActiveAssignments(p));
+}
+
+async function loadAssignmentHistory(page) {
+  assignState.histPage = page;
+  document.getElementById('assign-hist-body').innerHTML = loadingRow(6);
+  try {
+    const data = await api('GET', `/assignments/history?page=${page}&limit=10`);
+    renderAssignmentHistory(data);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function renderAssignmentHistory(data) {
+  const tbody = document.getElementById('assign-hist-body');
+  if (!data.data.length) {
+    tbody.innerHTML = emptyRow(6, 'No assignment history');
+    document.getElementById('assign-hist-pagination').innerHTML = '';
+    return;
+  }
+  tbody.innerHTML = data.data.map(a => `
+    <tr>
+      <td><span style="font-family:monospace;font-size:12px;background:#f0f0f0;padding:2px 8px;border-radius:4px">${a.asset?.asset_tag||'—'}</span></td>
+      <td>${a.asset?.asset_name||'—'}</td>
+      <td>${a.employee?.name||'—'}</td>
+      <td>${fmtDate(a.assigned_date)}</td>
+      <td>${a.returned_date ? fmtDate(a.returned_date) : '<span class="text-muted">Not returned</span>'}</td>
+      <td>${a.is_active ? '<span class="badge badge-assigned">Active</span>' : '<span class="badge badge-available">Returned</span>'}</td>
+    </tr>
+  `).join('');
+  renderPagination('assign-hist-pagination', data.page, Math.ceil(data.total/10), p => loadAssignmentHistory(p));
+}
+
+async function openAssignModal() {
+  document.getElementById('assign-modal-err').style.display = 'none';
+  document.getElementById('assign-notes').value = '';
+
+  try {
+    const [assetsData, empsData] = await Promise.all([
+      api('GET', '/assets?status=available&limit=100'),
+      api('GET', '/employees?limit=100')
+    ]);
+
+    const assetSel = document.getElementById('assign-asset-select');
+    assetSel.innerHTML = '<option value="">Select an available asset</option>' +
+      assetsData.data.map(a => `<option value="${a.id}">${a.asset_tag} — ${a.asset_name} (${a.brand || 'No brand'})</option>`).join('');
+
+    const empSel = document.getElementById('assign-emp-select');
+    empSel.innerHTML = '<option value="">Select an employee</option>' +
+      empsData.data.map(e => `<option value="${e.id}">${e.employee_id} — ${e.name} (${e.department || 'No dept'})</option>`).join('');
+
+    openModal('assign-modal');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doAssign() {
+  const asset_id    = parseInt(document.getElementById('assign-asset-select').value);
+  const employee_id = parseInt(document.getElementById('assign-emp-select').value);
+  const notes       = document.getElementById('assign-notes').value.trim() || null;
+  const errEl       = document.getElementById('assign-modal-err');
+  errEl.style.display = 'none';
+
+  if (!asset_id || !employee_id) {
+    errEl.textContent = 'Please select both an asset and an employee.';
+    errEl.style.display = 'block'; return;
+  }
+  try {
+    await api('POST', '/assignments/assign', { asset_id, employee_id, notes });
+    toast('Asset assigned successfully!');
+    closeModal('assign-modal');
+    loadActiveAssignments(1);
+    loadAssignmentHistory(1);
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  }
+}
+
+function confirmReturn(assignmentId, assetName, empName) {
+  showConfirm(
+    '↩️', `Return "${assetName}"?`,
+    `This will mark the asset as returned from ${empName} and set status back to Available.`,
+    async () => {
+      try {
+        await api('POST', `/assignments/${assignmentId}/return`);
+        toast('Asset returned successfully!');
+        loadActiveAssignments(assignState.activePage);
+        loadAssignmentHistory(1);
+      } catch (e) { toast(e.message, 'error'); }
+    }
+  );
+}
+
+// ── PROFILE ─────────────────────────────────────────────────────────────────
+async function loadProfile() {
+  try {
+    const u = await api('GET', '/auth/me');
+    document.getElementById('profile-info').innerHTML = `
+      <div class="detail-item"><label>Email</label><p>${u.email}</p></div>
+      <div class="detail-item"><label>Role</label><p>${roleBadge(u.role)}</p></div>
+      <div class="detail-item"><label>Account Status</label><p>${u.is_active ? '<span class="badge badge-available">Active</span>' : '<span class="badge badge-retired">Inactive</span>'}</p></div>
+      <div class="detail-item"><label>Member Since</label><p>${fmtDate(u.created_at)}</p></div>
+    `;
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ── PASSWORD UPDATE ────────────────────────────────────────────────────────
+async function updatePassword() {
+  const oldPw = document.getElementById('old-password').value;
+  const newPw = document.getElementById('new-password').value;
+  const confirmPw = document.getElementById('confirm-password').value;
+  const btn = document.getElementById('update-pw-btn');
+
+  if (!oldPw || !newPw || !confirmPw) return toast('All fields are required', 'error');
+  if (newPw !== confirmPw) return toast('New passwords do not match', 'error');
+  if (newPw.length < 6) return toast('Password must be at least 6 characters', 'error');
+
+  btn.textContent = 'Updating...';
+  btn.disabled = true;
+
+  try {
+    await api('PUT', '/auth/change-password', { old_password: oldPw, new_password: newPw });
+    toast('Password updated successfully!', 'success');
+    document.getElementById('old-password').value = '';
+    document.getElementById('new-password').value = '';
+    document.getElementById('confirm-password').value = '';
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.textContent = 'Update Password';
+    btn.disabled = false;
+  }
+}
+
+// ── AUDIT LOGS ───────────────────────────────────────────────────────────────
+async function loadAuditLogs(page) {
+  auditState.page = page;
+  document.getElementById('audit-table-body').innerHTML = loadingRow(5);
+  try {
+    const entity = document.getElementById('audit-entity-filter').value;
+    const action = document.getElementById('audit-action-filter').value;
+    const params = new URLSearchParams({ page, limit: 20 });
+    if (entity) params.set('entity_type', entity);
+    if (action) params.set('action', action);
+    const data = await api('GET', `/audit-logs?${params}`);
+    renderAuditTable(data);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function renderAuditTable(data) {
+  const tbody = document.getElementById('audit-table-body');
+  if (!data.data.length) {
+    tbody.innerHTML = emptyRow(5, 'No audit logs found');
+    document.getElementById('audit-pagination').innerHTML = '';
+    return;
+  }
+  const actionColors = { created:'success', updated:'info', deleted:'under_repair', assigned:'assigned', returned:'available' };
+  tbody.innerHTML = data.data.map(l => `
+    <tr>
+      <td><span class="badge badge-${actionColors[l.action]||'available'}">${l.action}</span></td>
+      <td>${l.entity_type || '—'} #${l.entity_id || '—'}</td>
+      <td style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.details || '—'}</td>
+      <td>User #${l.performed_by || '—'}</td>
+      <td>${fmtDateTime(l.created_at)}</td>
+    </tr>
+  `).join('');
+  renderPagination('audit-pagination', data.page, Math.ceil(data.total/20), p => loadAuditLogs(p));
+}
+
+// ── UI HELPERS ─────────────────────────────────────────────────────────────
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.classList.remove('open');
+  });
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
+});
+
+function showConfirm(icon, title, message, onConfirm) {
+  document.getElementById('confirm-icon').textContent    = icon;
+  document.getElementById('confirm-title').textContent   = title;
+  document.getElementById('confirm-message').textContent = message;
+  const btn = document.getElementById('confirm-ok-btn');
+  btn.onclick = () => { closeModal('confirm-modal'); onConfirm(); };
+  openModal('confirm-modal');
+}
+
+function renderPagination(containerId, currentPg, totalPages, onPageClick) {
+  const el = document.getElementById(containerId);
+  if (!totalPages || totalPages <= 1) { el.innerHTML = ''; return; }
+  const range = [];
+  for (let i = Math.max(1, currentPg-2); i <= Math.min(totalPages, currentPg+2); i++) range.push(i);
+  el.innerHTML = `<span class="page-info">Page ${currentPg} of ${totalPages}</span>`;
+  const prev = makeBtn('‹', currentPg > 1, () => onPageClick(currentPg - 1));
+  el.appendChild(prev);
+  range.forEach(p => {
+    const b = makeBtn(p, true, () => onPageClick(p));
+    if (p === currentPg) b.classList.add('active');
+    el.appendChild(b);
+  });
+  const next = makeBtn('›', currentPg < totalPages, () => onPageClick(currentPg + 1));
+  el.appendChild(next);
+}
+
+// ── REGISTRATION WORKFLOW MANAGEMENT ────────────────────────────────────────
+async function loadPendingApprovals() {
+  const tbody = document.getElementById('approvals-table-body');
+  tbody.innerHTML = loadingRow(4);
+  try {
+    const data = await api('GET', '/admin/pending-users');
+    if (!data.length) {
+      tbody.innerHTML = emptyRow(4, 'No pending registration requests found');
+      return;
+    }
+    tbody.innerHTML = data.map(u => `
+      <tr>
+        <td><strong>${u.email}</strong></td>
+        <td><span class="badge badge-employee">${u.role.toUpperCase()}</span></td>
+        <td>${fmtDate(u.created_at)}</td>
+        <td>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-success btn-sm" onclick="openApprovalModal(${u.id}, '${u.role}')">✔️ Verify</button>
+            <button class="btn btn-danger btn-sm" onclick="rejectRequest(${u.id}, '${u.email}')">🗑️ Reject</button>
+          </div>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function openApprovalModal(userId, role) {
+  document.getElementById('approve-user-id').value = userId;
+  document.getElementById('approve-emp-id').value = '';
+  document.getElementById('approve-name').value = '';
+  document.getElementById('approve-dept').value = '';
+  document.getElementById('approve-desig').value = '';
+  document.getElementById('approve-role').value = role;
+  
+  // 🔒 Auto-set Joining Date to Today and make it Unselectable
+  document.getElementById('approve-joining').value = new Date().toISOString().split('T')[0];
+  document.getElementById('approve-joining').disabled = true; 
+
+  document.getElementById('approval-modal-err').style.display = 'none';
+  openModal('approval-modal');
+}
+
+async function submitApproval() {
+  const userId = document.getElementById('approve-user-id').value;
+  const body = {
+    employee_id: document.getElementById('approve-emp-id').value.trim(),
+    name: document.getElementById('approve-name').value.trim(),
+    department: document.getElementById('approve-dept').value || 'Unassigned',
+    designation: document.getElementById('approve-desig').value.trim() || 'Associate',
+    joining_date: document.getElementById('approve-joining').value,
+    role: document.getElementById('approve-role').value
+  };
+  const errEl = document.getElementById('approval-modal-err');
+  errEl.style.display = 'none';
+
+  if (!body.employee_id || !body.name) {
+    errEl.textContent = 'Employee ID and Profile Name are mandatory fields.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!body.joining_date) {
+    errEl.textContent = 'A Joining Date is required to approve an employee.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!isValidPastOrToday(body.joining_date)) {
+    errEl.textContent = 'Joining Date cannot be in the future.';
+    errEl.style.display = 'block'; return;
+  }
+
+  try {
+    await api('POST', `/admin/users/${userId}/approve`, body);
+    toast('User request approved. Profile records provisioned.');
+    closeModal('approval-modal');
+    loadPendingApprovals();
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  }
+}
+
+function rejectRequest(userId, email) {
+  showConfirm(
+    '⚠️', `Deny access to ${email}?`,
+    'This will remove this application request permanently. The user will be notified of verification failure.',
+    async () => {
+      try {
+        await api('DELETE', `/admin/users/${userId}/reject`);
+        toast('Registration entry purged successfully.', 'info');
+        loadPendingApprovals();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+  );
+}
+
+function makeBtn(label, enabled, onClick) {
+  const b = document.createElement('button');
+  b.className = 'btn-icon';
+  b.textContent = label;
+  b.disabled = !enabled;
+  if (enabled) b.addEventListener('click', onClick);
+  return b;
+}
+
+function statusBadge(s) {
+  const map = {
+    available:    '<span class="badge badge-available">✅ Available</span>',
+    assigned:     '<span class="badge badge-assigned">🔗 Assigned</span>',
+    under_repair: '<span class="badge badge-under_repair">🔧 Under Repair</span>',
+    retired:      '<span class="badge badge-retired">📦 Retired</span>',
+  };
+  return map[s] || `<span class="badge">${s}</span>`;
+}
+
+function roleBadge(r) {
+  return r === 'admin'
+    ? '<span class="badge badge-admin">🛡️ Admin</span>'
+    : '<span class="badge badge-employee">👤 Employee</span>';
+}
+
+function loadingRow(cols) {
+  return `<tr class="loading-row"><td colspan="${cols}"><div class="spinner"></div></td></tr>`;
+}
+function emptyRow(cols, msg) {
+  return `<tr><td colspan="${cols}"><div class="empty-state"><div class="empty-icon">📭</div><p>${msg}</p></div></td></tr>`;
+}
+
+function fmtDate(d) {
+  if (!d) return '—';
+  return new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
+}
+function fmtDateTime(d) {
+  if (!d) return '—';
+  return new Date(d).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+
+// ── BOOTSTRAP ─────────────────────────────────────────────────────────────
+(function init() {
+  if (authToken && currentUser) {
+    initApp();
+  } else {
+    document.getElementById('auth-wrapper').classList.add('active');
+  }
+})();
+</script>
+</body>
+</html>
