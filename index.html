@@ -498,6 +498,10 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
     <button class="nav-item" onclick="navigate('employees')" data-page="employees">
       <span class="nav-icon">👥</span> Employees
     </button>
+    <div class="sidebar-section-label" id="admin-workflow-label" style="display:none">Workflows</div>
+    <button class="nav-item" onclick="navigate('approvals')" data-page="approvals" id="approvals-nav" style="display:none">
+      <span class="nav-icon">⏳</span> Pending Approvals
+    </button>
     <button class="nav-item" onclick="navigate('assets')" data-page="assets">
       <span class="nav-icon">💻</span> Assets
     </button>
@@ -742,6 +746,28 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </main>
 </div>
 
+
+<div id="page-approvals" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <h1>Registration Approvals</h1>
+          <p>Verify applicant records before authorizing corporate system access</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Account Email</th><th>Requested Privilege</th><th>Registration Date</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="approvals-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
 <!-- ═══════════════════════════════════════════════════════════════════════
      MODALS
 ═══════════════════════════════════════════════════════════════════════ -->
@@ -902,6 +928,61 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
+<div class="modal-overlay" id="approval-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Approve & Provision Profile</span>
+      <button class="modal-close" onclick="closeModal('approval-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="approve-user-id" />
+      <div class="form-row">
+        <div class="form-group">
+          <label>Assign Employee ID *</label>
+          <input id="approve-emp-id" class="input" placeholder="EMP101" />
+        </div>
+        <div class="form-group">
+          <label>Full Name *</label>
+          <input id="approve-name" class="input" placeholder="Jane Doe" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Department</label>
+          <select id="approve-dept" class="input">
+            <option value="">Select Department</option>
+            <option>Engineering</option><option>HR</option><option>Finance</option>
+            <option>Marketing</option><option>Sales</option><option>Operations</option><option>IT</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Designation</label>
+          <input id="approve-desig" class="input" placeholder="Senior Developer" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Joining Date</label>
+          <input id="approve-joining" class="input" type="date" />
+        </div>
+        <div class="form-group">
+          <label>Assigned App Role</label>
+          <select id="approve-role" class="input">
+            <option value="employee">Employee</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+      </div>
+      <div id="approval-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('approval-modal')">Cancel</button>
+      <button class="btn btn-success" onclick="submitApproval()">Confirm Authorization</button>
+    </div>
+  </div>
+</div>
+
+
 <!-- Toast Container -->
 <div id="toast-container"></div>
 
@@ -910,7 +991,7 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 ═══════════════════════════════════════════════════════════════════════ -->
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────
-const API = 'https://asset-managment-system.onrender.com/api';   // ← change to your deployed URL
+const API = 'http://localhost:8000/api';   // ← change to your deployed URL
 
 // ── STATE ─────────────────────────────────────────────────────────────────
 let currentUser  = JSON.parse(localStorage.getItem('ams_user')  || 'null');
@@ -933,9 +1014,14 @@ async function api(method, path, body = null) {
   };
   if (body) opts.body = JSON.stringify(body);
 
-  const res = await fetch(`${API}${path}`, opts);
+ const res = await fetch(`${API}${path}`, opts);
 
   if (res.status === 401) {
+    // 🛠️ FIX: If we are on the login page, don't say session expired! Show the real error.
+    if (path === '/auth/login') {
+      const data = await res.json();
+      throw new Error(data?.detail || 'Invalid email or password');
+    }
     logout();
     throw new Error('Session expired');
   }
@@ -1024,6 +1110,8 @@ function initApp() {
   document.getElementById('auth-wrapper').classList.remove('active');
   document.getElementById('sidebar').classList.add('active');
   document.getElementById('main-wrapper').classList.add('active');
+  document.getElementById('admin-workflow-label').style.display = isAdmin ? '' : 'none';
+  document.getElementById('approvals-nav').style.display = isAdmin ? '' : 'none';
 
   // Topbar
   const initials = currentUser.email.charAt(0).toUpperCase();
@@ -1050,6 +1138,7 @@ const pageMeta = {
   assignments: { title: 'Assignments', sub: 'Assign and return assets' },
   profile:     { title: 'Profile',     sub: 'Your account details' },
   auditlogs:   { title: 'Audit Logs',  sub: 'Full activity trail' },
+  approvals: { title: 'Registration Approvals', sub: 'Verify applicant records before authorizing corporate system access' },
 };
 
 function navigate(page) {
@@ -1072,6 +1161,7 @@ function navigate(page) {
   else if (page === 'assignments') { loadActiveAssignments(1); loadAssignmentHistory(1); }
   else if (page === 'profile')     loadProfile();
   else if (page === 'auditlogs')   loadAuditLogs(1);
+  else if (page === 'approvals') loadPendingApprovals();
 }
 
 // ── DASHBOARD ──────────────────────────────────────────────────────────────
@@ -1635,6 +1725,87 @@ function renderPagination(containerId, currentPg, totalPages, onPageClick) {
   });
   const next = makeBtn('›', currentPg < totalPages, () => onPageClick(currentPg + 1));
   el.appendChild(next);
+}
+
+
+// ── REGISTRATION WORKFLOW MANAGEMENT ────────────────────────────────────────
+async function loadPendingApprovals() {
+  const tbody = document.getElementById('approvals-table-body');
+  tbody.innerHTML = loadingRow(4);
+  try {
+    const data = await api('GET', '/admin/pending-users');
+    if (!data.length) {
+      tbody.innerHTML = emptyRow(4, 'No pending registration requests found');
+      return;
+    }
+    tbody.innerHTML = data.map(u => `
+      <tr>
+        <td><strong>${u.email}</strong></td>
+        <td><span class="badge badge-employee">${u.role.toUpperCase()}</span></td>
+        <td>${fmtDate(u.created_at)}</td>
+        <td>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-success btn-sm" onclick="openApprovalModal(${u.id}, '${u.role}')">✔️ Verify</button>
+            <button class="btn btn-danger btn-sm" onclick="rejectRequest(${u.id}, '${u.email}')">🗑️ Reject</button>
+          </div>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function openApprovalModal(userId, role) {
+  document.getElementById('approve-user-id').value = userId;
+  document.getElementById('approve-emp-id').value = '';
+  document.getElementById('approve-name').value = '';
+  document.getElementById('approve-dept').value = '';
+  document.getElementById('approve-desig').value = '';
+  document.getElementById('approve-joining').value = new Date().toISOString().split('T')[0];
+  document.getElementById('approve-role').value = role;
+  document.getElementById('approval-modal-err').style.display = 'none';
+  openModal('approval-modal');
+}
+
+async function submitApproval() {
+  const userId = document.getElementById('approve-user-id').value;
+  const body = {
+    employee_id: document.getElementById('approve-emp-id').value.trim(),
+    name: document.getElementById('approve-name').value.trim(),
+    department: document.getElementById('approve-dept').value || 'Unassigned',
+    designation: document.getElementById('approve-desig').value.trim() || 'Associate',
+    joining_date: document.getElementById('approve-joining').value,
+    role: document.getElementById('approve-role').value
+  };
+  const errEl = document.getElementById('approval-modal-err');
+  errEl.style.display = 'none';
+
+  if (!body.employee_id || !body.name) {
+    errEl.textContent = 'Employee ID and Profile Name are mandatory fields.';
+    errEl.style.display = 'block'; return;
+  }
+
+  try {
+    await api('POST', `/admin/users/${userId}/approve`, body);
+    toast('User request approved. Profile records provisioned.');
+    closeModal('approval-modal');
+    loadPendingApprovals();
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  }
+}
+
+function rejectRequest(userId, email) {
+  showConfirm(
+    '⚠️', `Deny access to ${email}?`,
+    'This will remove this application request permanently. The user will be notified of verification failure.',
+    async () => {
+      try {
+        await api('DELETE', `/admin/users/${userId}/reject`);
+        toast('Registration entry purged successfully.', 'info');
+        loadPendingApprovals();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+  );
 }
 
 function makeBtn(label, enabled, onClick) {
