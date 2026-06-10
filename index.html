@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>AssetTrack — Asset Management System</title>
 
-<!-- ═══════════════════════════════════════════════════════════════════════
-     STYLES
-═══════════════════════════════════════════════════════════════════════ -->
 <style>
 /* ── Reset & Tokens ─────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -424,11 +421,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 </head>
 
 <body>
-<!-- ═══════════════════════════════════════════════════════════════════════
-     HTML STRUCTURE
-═══════════════════════════════════════════════════════════════════════ -->
-
-<!-- Auth Pages -->
 <div id="auth-wrapper">
   <div class="auth-card">
     <div class="auth-logo">Asset<span>Track</span></div>
@@ -439,7 +431,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       <button class="auth-tab" onclick="showAuthTab('register')">Register</button>
     </div>
 
-    <!-- Login Form -->
     <div id="tab-login">
       <div class="form-group">
         <label>Email Address</label>
@@ -453,12 +444,8 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       <button class="btn btn-primary w-full" style="justify-content:center;padding:11px" onclick="doLogin()">
         <span id="login-btn-text">Sign In</span>
       </button>
-      <p style="text-align:center;font-size:12px;color:var(--c-muted);margin-top:16px">
-        <strong>Demo:</strong> admin@demo.com / admin123
-      </p>
     </div>
 
-    <!-- Register Form -->
     <div id="tab-register" style="display:none">
       <div class="form-group">
         <label>Email Address</label>
@@ -472,7 +459,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
         <label>Account Role</label>
         <select id="reg-role" class="input">
           <option value="employee">Employee</option>
-          <option value="admin">Admin</option>
         </select>
       </div>
       <div id="reg-err" class="err-msg" style="margin-bottom:10px;display:none"></div>
@@ -483,7 +469,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
-<!-- Sidebar -->
 <div id="sidebar">
   <div class="sidebar-brand">
     <div class="sidebar-brand-name">Asset<span>Track</span></div>
@@ -524,7 +509,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
-<!-- Main Wrapper -->
 <div id="main-wrapper">
   <header class="topbar">
     <div class="topbar-left">
@@ -538,7 +522,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </header>
 
   <main class="page-content">
-    <!-- ── Dashboard ────────────────────────────────── -->
     <div id="page-dashboard" class="page">
       <div class="stats-grid" id="dash-stats"></div>
       <div class="dash-grid">
@@ -560,7 +543,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       </div>
     </div>
 
-    <!-- ── Employees ─────────────────────────────────── -->
     <div id="page-employees" class="page" style="display:none">
       <div class="page-header">
         <div>
@@ -594,7 +576,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       </div>
     </div>
 
-    <!-- ── Assets ────────────────────────────────────── -->
     <div id="page-assets" class="page" style="display:none">
       <div class="page-header">
         <div>
@@ -648,7 +629,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       </div>
     </div>
 
-    <!-- ── Assignments ────────────────────────────────── -->
     <div id="page-assignments" class="page" style="display:none">
       <div class="page-header">
         <div>
@@ -684,7 +664,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       </div>
     </div>
 
-    <!-- ── Profile ───────────────────────────────────── -->
     <div id="page-profile" class="page" style="display:none">
       <div class="page-header"><div><h1>Profile</h1><p>Your account details</p></div></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
@@ -714,7 +693,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       </div>
     </div>
 
-    <!-- ── Audit Logs ─────────────────────────────────── -->
     <div id="page-auditlogs" class="page" style="display:none">
       <div class="page-header"><div><h1>Audit Logs</h1><p>Full activity trail</p></div></div>
       <div class="card">
@@ -743,11 +721,8 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
         <div class="pagination" id="audit-pagination"></div>
       </div>
     </div>
-  </main>
-</div>
 
-
-<div id="page-approvals" class="page" style="display:none">
+    <div id="page-approvals" class="page" style="display:none">
       <div class="page-header">
         <div>
           <h1>Registration Approvals</h1>
@@ -767,12 +742,9 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
         </div>
       </div>
     </div>
+  </main>
+</div>
 
-<!-- ═══════════════════════════════════════════════════════════════════════
-     MODALS
-═══════════════════════════════════════════════════════════════════════ -->
-
-<!-- Employee Modal -->
 <div class="modal-overlay" id="emp-modal">
   <div class="modal">
     <div class="modal-header">
@@ -811,7 +783,7 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
         </div>
       </div>
       <div class="form-group">
-        <label>Joining Date</label>
+        <label>Joining Date *</label>
         <input id="emp-joining" class="input" type="date" />
       </div>
       <div id="emp-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
@@ -823,7 +795,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
-<!-- Asset Modal -->
 <div class="modal-overlay" id="asset-modal">
   <div class="modal">
     <div class="modal-header">
@@ -863,7 +834,7 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
           <input id="asset-serial" class="input" placeholder="SN-12345678" />
         </div>
         <div class="form-group">
-          <label>Purchase Date</label>
+          <label>Purchase Date *</label>
           <input id="asset-purchase-date" class="input" type="date" />
         </div>
       </div>
@@ -884,7 +855,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
-<!-- Assign Modal -->
 <div class="modal-overlay" id="assign-modal">
   <div class="modal" style="max-width:460px">
     <div class="modal-header">
@@ -913,7 +883,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
-<!-- Confirm Dialog -->
 <div class="modal-overlay" id="confirm-modal">
   <div class="modal confirm-modal">
     <div class="modal-body" style="text-align:center;padding:28px 24px">
@@ -962,7 +931,7 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>Joining Date</label>
+          <label>Joining Date *</label>
           <input id="approve-joining" class="input" type="date" />
         </div>
         <div class="form-group">
@@ -982,13 +951,8 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   </div>
 </div>
 
-
-<!-- Toast Container -->
 <div id="toast-container"></div>
 
-<!-- ═══════════════════════════════════════════════════════════════════════
-     JAVASCRIPT
-═══════════════════════════════════════════════════════════════════════ -->
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────
 const API = 'http://localhost:8000/api';   // ← change to your deployed URL
@@ -1003,6 +967,15 @@ const assetState = { page: 1, search: '', status: '', type: '', debounceTimer: n
 const assignState= { activePage: 1, histPage: 1, tab: 'active' };
 const auditState = { page: 1 };
 
+// ── VALIDATION HELPERS ──────────────────────────────────────────────────────
+function isValidPastOrToday(dateString) {
+  if (!dateString) return false;
+  const selectedDate = new Date(dateString);
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  return selectedDate <= today;
+}
+
 // ── HTTP HELPER ────────────────────────────────────────────────────────────
 async function api(method, path, body = null) {
   const opts = {
@@ -1014,10 +987,9 @@ async function api(method, path, body = null) {
   };
   if (body) opts.body = JSON.stringify(body);
 
- const res = await fetch(`${API}${path}`, opts);
+  const res = await fetch(`${API}${path}`, opts);
 
   if (res.status === 401) {
-    // 🛠️ FIX: If we are on the login page, don't say session expired! Show the real error.
     if (path === '/auth/login') {
       const data = await res.json();
       throw new Error(data?.detail || 'Invalid email or password');
@@ -1085,6 +1057,15 @@ async function doRegister() {
   const errEl    = document.getElementById('reg-err');
   errEl.style.display = 'none';
 
+  if (!email || !password) {
+    errEl.textContent = 'Email and Password are required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (password.length < 6) {
+    errEl.textContent = 'Password must be at least 6 characters.';
+    errEl.style.display = 'block'; return;
+  }
+
   try {
     await api('POST', '/auth/register', { email, password, role });
     toast('Account created! Please sign in.', 'success');
@@ -1110,8 +1091,6 @@ function initApp() {
   document.getElementById('auth-wrapper').classList.remove('active');
   document.getElementById('sidebar').classList.add('active');
   document.getElementById('main-wrapper').classList.add('active');
-  document.getElementById('admin-workflow-label').style.display = isAdmin ? '' : 'none';
-  document.getElementById('approvals-nav').style.display = isAdmin ? '' : 'none';
 
   // Topbar
   const initials = currentUser.email.charAt(0).toUpperCase();
@@ -1126,6 +1105,8 @@ function initApp() {
   });
   document.getElementById('audit-section').style.display = isAdmin ? '' : 'none';
   document.getElementById('audit-nav').style.display     = isAdmin ? '' : 'none';
+  document.getElementById('admin-workflow-label').style.display = isAdmin ? '' : 'none';
+  document.getElementById('approvals-nav').style.display         = isAdmin ? '' : 'none';
 
   navigate('dashboard');
 }
@@ -1138,7 +1119,7 @@ const pageMeta = {
   assignments: { title: 'Assignments', sub: 'Assign and return assets' },
   profile:     { title: 'Profile',     sub: 'Your account details' },
   auditlogs:   { title: 'Audit Logs',  sub: 'Full activity trail' },
-  approvals: { title: 'Registration Approvals', sub: 'Verify applicant records before authorizing corporate system access' },
+  approvals:   { title: 'Registration Approvals', sub: 'Verify applicant records before authorizing corporate system access' },
 };
 
 function navigate(page) {
@@ -1161,7 +1142,7 @@ function navigate(page) {
   else if (page === 'assignments') { loadActiveAssignments(1); loadAssignmentHistory(1); }
   else if (page === 'profile')     loadProfile();
   else if (page === 'auditlogs')   loadAuditLogs(1);
-  else if (page === 'approvals') loadPendingApprovals();
+  else if (page === 'approvals')   loadPendingApprovals();
 }
 
 // ── DASHBOARD ──────────────────────────────────────────────────────────────
@@ -1207,36 +1188,6 @@ function renderRecentAssignments(items) {
       <td>${fmtDate(a.assigned_date)}</td>
     </tr>
   `).join('');
-}
-
-// ── PASSWORD UPDATE ────────────────────────────────────────────────────────
-async function updatePassword() {
-  const oldPw = document.getElementById('old-password').value;
-  const newPw = document.getElementById('new-password').value;
-  const confirmPw = document.getElementById('confirm-password').value;
-  const btn = document.getElementById('update-pw-btn');
-
-  if (!oldPw || !newPw || !confirmPw) return toast('All fields are required', 'error');
-  if (newPw !== confirmPw) return toast('New passwords do not match', 'error');
-  if (newPw.length < 6) return toast('Password must be at least 6 characters', 'error');
-
-  btn.textContent = 'Updating...';
-  btn.disabled = true;
-
-  try {
-    await api('PUT', '/auth/change-password', { old_password: oldPw, new_password: newPw });
-    toast('Password updated successfully!', 'success');
-    
-    // Clear inputs
-    document.getElementById('old-password').value = '';
-    document.getElementById('new-password').value = '';
-    document.getElementById('confirm-password').value = '';
-  } catch (e) {
-    toast(e.message, 'error');
-  } finally {
-    btn.textContent = 'Update Password';
-    btn.disabled = false;
-  }
 }
 
 function renderStatusChart(d) {
@@ -1334,10 +1285,20 @@ async function saveEmployee() {
   };
   const errEl = document.getElementById('emp-modal-err');
   errEl.style.display = 'none';
+  
   if (!body.name || !body.email || (!id && !body.employee_id)) {
-    errEl.textContent = 'Employee ID, Name and Email are required.';
+    errEl.textContent = 'Employee ID, Name, and Email are required.';
     errEl.style.display = 'block'; return;
   }
+  if (!body.joining_date) {
+    errEl.textContent = 'Joining Date is required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!isValidPastOrToday(body.joining_date)) {
+    errEl.textContent = 'Joining Date cannot be in the future.';
+    errEl.style.display = 'block'; return;
+  }
+
   try {
     if (id) {
       const { employee_id, ...updateBody } = body;
@@ -1447,14 +1408,25 @@ async function saveAsset() {
     purchase_date: document.getElementById('asset-purchase-date').value || null,
     status:        document.getElementById('asset-status').value,
   };
+  
   const errEl = document.getElementById('asset-modal-err');
+  const saveBtn = document.querySelector('#asset-modal .btn-primary');
+  
   errEl.style.display = 'none';
+
   if (!body.asset_name || !body.asset_type || (!id && !body.asset_tag)) {
-    errEl.textContent = 'Asset Tag, Name and Type are required.';
+    errEl.textContent = 'Asset Tag, Name, and Type are required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!body.purchase_date) {
+    errEl.textContent = 'Purchase Date is required.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!isValidPastOrToday(body.purchase_date)) {
+    errEl.textContent = 'Purchase Date cannot be in the future.';
     errEl.style.display = 'block'; return;
   }
 
-// 🔒 ENHANCEMENT: Disable button to prevent duplicate submissions
   saveBtn.textContent = 'Saving...';
   saveBtn.disabled = true;
 
@@ -1471,6 +1443,9 @@ async function saveAsset() {
     loadAssets(assetState.page);
   } catch (e) {
     errEl.textContent = e.message; errEl.style.display = 'block';
+  } finally {
+    saveBtn.textContent = 'Save Asset';
+    saveBtn.disabled = false;
   }
 }
 
@@ -1645,6 +1620,34 @@ async function loadProfile() {
   } catch (e) { toast(e.message, 'error'); }
 }
 
+// ── PASSWORD UPDATE ────────────────────────────────────────────────────────
+async function updatePassword() {
+  const oldPw = document.getElementById('old-password').value;
+  const newPw = document.getElementById('new-password').value;
+  const confirmPw = document.getElementById('confirm-password').value;
+  const btn = document.getElementById('update-pw-btn');
+
+  if (!oldPw || !newPw || !confirmPw) return toast('All fields are required', 'error');
+  if (newPw !== confirmPw) return toast('New passwords do not match', 'error');
+  if (newPw.length < 6) return toast('Password must be at least 6 characters', 'error');
+
+  btn.textContent = 'Updating...';
+  btn.disabled = true;
+
+  try {
+    await api('PUT', '/auth/change-password', { old_password: oldPw, new_password: newPw });
+    toast('Password updated successfully!', 'success');
+    document.getElementById('old-password').value = '';
+    document.getElementById('new-password').value = '';
+    document.getElementById('confirm-password').value = '';
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.textContent = 'Update Password';
+    btn.disabled = false;
+  }
+}
+
 // ── AUDIT LOGS ───────────────────────────────────────────────────────────────
 async function loadAuditLogs(page) {
   auditState.page = page;
@@ -1684,14 +1687,12 @@ function renderAuditTable(data) {
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
-// Close modal on overlay click
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', e => {
     if (e.target === overlay) overlay.classList.remove('open');
   });
 });
 
-// Escape key closes modals
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
 });
@@ -1710,11 +1711,6 @@ function renderPagination(containerId, currentPg, totalPages, onPageClick) {
   if (!totalPages || totalPages <= 1) { el.innerHTML = ''; return; }
   const range = [];
   for (let i = Math.max(1, currentPg-2); i <= Math.min(totalPages, currentPg+2); i++) range.push(i);
-  el.innerHTML = `
-    <span class="page-info">Page ${currentPg} of ${totalPages}</span>
-    <button class="btn-icon" ${currentPg===1?'disabled':''} onclick="${onPageClick.toString().replace(/function.*?{/, '').replace(/}$/, '')}">‹</button>
-  `;
-  // Rebuild cleanly
   el.innerHTML = `<span class="page-info">Page ${currentPg} of ${totalPages}</span>`;
   const prev = makeBtn('‹', currentPg > 1, () => onPageClick(currentPg - 1));
   el.appendChild(prev);
@@ -1726,7 +1722,6 @@ function renderPagination(containerId, currentPg, totalPages, onPageClick) {
   const next = makeBtn('›', currentPg < totalPages, () => onPageClick(currentPg + 1));
   el.appendChild(next);
 }
-
 
 // ── REGISTRATION WORKFLOW MANAGEMENT ────────────────────────────────────────
 async function loadPendingApprovals() {
@@ -1781,6 +1776,14 @@ async function submitApproval() {
 
   if (!body.employee_id || !body.name) {
     errEl.textContent = 'Employee ID and Profile Name are mandatory fields.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!body.joining_date) {
+    errEl.textContent = 'A Joining Date is required to approve an employee.';
+    errEl.style.display = 'block'; return;
+  }
+  if (!isValidPastOrToday(body.joining_date)) {
+    errEl.textContent = 'Joining Date cannot be in the future.';
     errEl.style.display = 'block'; return;
   }
 
