@@ -444,6 +444,9 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       <button class="btn btn-primary w-full" style="justify-content:center;padding:11px" onclick="doLogin()">
         <span id="login-btn-text">Sign In</span>
       </button>
+      <p style="text-align:center;font-size:12px;color:var(--c-muted);margin-top:16px">
+        <strong>Demo:</strong> admin@demo.com / admin123
+      </p>
     </div>
 
     <div id="tab-register" style="display:none">
@@ -454,12 +457,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
       <div class="form-group">
         <label>Password (min 6 chars)</label>
         <input id="reg-password" class="input" type="password" placeholder="Create a password" />
-      </div>
-      <div class="form-group">
-        <label>Account Role</label>
-        <select id="reg-role" class="input">
-          <option value="employee">Employee</option>
-        </select>
       </div>
       <div id="reg-err" class="err-msg" style="margin-bottom:10px;display:none"></div>
       <button class="btn btn-primary w-full" style="justify-content:center;padding:11px" onclick="doRegister()">
@@ -955,7 +952,7 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────
-const API = 'https://asset-managment-system.onrender.com/api';   // ← change to your deployed URL
+const API = 'http://localhost:8000/api';   // ← change to your deployed URL
 
 // ── STATE ─────────────────────────────────────────────────────────────────
 let currentUser  = JSON.parse(localStorage.getItem('ams_user')  || 'null');
@@ -974,6 +971,19 @@ function isValidPastOrToday(dateString) {
   const today = new Date();
   today.setHours(23, 59, 59, 999);
   return selectedDate <= today;
+}
+
+function isValidPurchaseDate(dateString) {
+  if (!dateString) return false;
+  const selectedDate = new Date(dateString);
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  
+  const tenYearsAgo = new Date();
+  tenYearsAgo.setFullYear(today.getFullYear() - 10);
+  tenYearsAgo.setHours(0, 0, 0, 0);
+
+  return selectedDate >= tenYearsAgo && selectedDate <= today;
 }
 
 // ── HTTP HELPER ────────────────────────────────────────────────────────────
@@ -1053,7 +1063,6 @@ async function doLogin() {
 async function doRegister() {
   const email    = document.getElementById('reg-email').value.trim();
   const password = document.getElementById('reg-password').value;
-  const role     = document.getElementById('reg-role').value;
   const errEl    = document.getElementById('reg-err');
   errEl.style.display = 'none';
 
@@ -1067,7 +1076,7 @@ async function doRegister() {
   }
 
   try {
-    await api('POST', '/auth/register', { email, password, role });
+    await api('POST', '/auth/register', { email, password });
     toast('Account created! Please sign in.', 'success');
     showAuthTab('login');
     document.getElementById('login-email').value = email;
@@ -1266,8 +1275,13 @@ function openEmpModal(emp = null) {
   document.getElementById('emp-email').value      = emp?.email || '';
   document.getElementById('emp-dept').value       = emp?.department || '';
   document.getElementById('emp-desig').value      = emp?.designation || '';
-  document.getElementById('emp-joining').value    = emp?.joining_date || '';
   document.getElementById('emp-id-field').disabled = !!emp;
+  
+  // 🔒 Auto-set Joining Date to Today and make it Unselectable
+  const todayStr = new Date().toISOString().split('T')[0];
+  document.getElementById('emp-joining').value = emp?.joining_date || todayStr;
+  document.getElementById('emp-joining').disabled = true; 
+
   document.getElementById('emp-modal-title').textContent = emp ? 'Edit Employee' : 'Add Employee';
   document.getElementById('emp-modal-err').style.display = 'none';
   openModal('emp-modal');
@@ -1415,15 +1429,17 @@ async function saveAsset() {
   errEl.style.display = 'none';
 
   if (!body.asset_name || !body.asset_type || (!id && !body.asset_tag)) {
-    errEl.textContent = 'Asset Tag, Name, and Type are required.';
+    errEl.textContent = 'Asset Tag, Name and Type are required.';
     errEl.style.display = 'block'; return;
   }
   if (!body.purchase_date) {
     errEl.textContent = 'Purchase Date is required.';
     errEl.style.display = 'block'; return;
   }
-  if (!isValidPastOrToday(body.purchase_date)) {
-    errEl.textContent = 'Purchase Date cannot be in the future.';
+  
+  // 🔒 Enforce 10-Year Purchase Rule
+  if (!isValidPurchaseDate(body.purchase_date)) {
+    errEl.textContent = 'Purchase Date cannot be in the future or older than 10 years.';
     errEl.style.display = 'block'; return;
   }
 
@@ -1755,8 +1771,12 @@ function openApprovalModal(userId, role) {
   document.getElementById('approve-name').value = '';
   document.getElementById('approve-dept').value = '';
   document.getElementById('approve-desig').value = '';
-  document.getElementById('approve-joining').value = new Date().toISOString().split('T')[0];
   document.getElementById('approve-role').value = role;
+  
+  // 🔒 Auto-set Joining Date to Today and make it Unselectable
+  document.getElementById('approve-joining').value = new Date().toISOString().split('T')[0];
+  document.getElementById('approve-joining').disabled = true; 
+
   document.getElementById('approval-modal-err').style.display = 'none';
   openModal('approval-modal');
 }
