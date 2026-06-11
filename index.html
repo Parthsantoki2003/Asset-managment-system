@@ -2159,18 +2159,30 @@ function renderAssetTable(data) {
 }
 
 function openAssetModal(asset = null) {
-  document.getElementById('asset-edit-id').value     = asset?.id || '';
-  document.getElementById('asset-tag').value         = asset?.asset_tag || '';
-  document.getElementById('asset-name').value        = asset?.asset_name || '';
-  document.getElementById('asset-type').value        = asset?.asset_type || '';
-  document.getElementById('asset-brand').value       = asset?.brand || '';
-  document.getElementById('asset-serial').value      = asset?.serial_number || '';
+  document.getElementById('asset-edit-id').value       = asset?.id || '';
+  document.getElementById('asset-tag').value           = asset?.asset_tag || '';
+  document.getElementById('asset-name').value          = asset?.asset_name || '';
+  document.getElementById('asset-type').value          = asset?.asset_type || '';
+  document.getElementById('asset-brand').value         = asset?.brand || '';
+  document.getElementById('asset-serial').value        = asset?.serial_number || '';
   document.getElementById('asset-purchase-date').value = asset?.purchase_date || '';
-  document.getElementById('asset-status').value      = asset?.status || 'available';
-  document.getElementById('asset-tag').disabled      = !!asset;
+  document.getElementById('asset-status').value        = asset?.status || 'available';
+  document.getElementById('asset-tag').disabled        = !!asset;
   document.getElementById('asset-modal-title').textContent = asset ? 'Edit Asset' : 'Add Asset';
   document.getElementById('asset-modal-err').style.display = 'none';
+
+  // 🌟 NEW: Lock the status field if the asset is currently assigned
+  const statusSelect = document.getElementById('asset-status');
+  if (asset && asset.status === 'assigned') {
+    statusSelect.disabled = true;
+    statusSelect.title = "Cannot change status of an assigned asset directly. Please return it via the Assignments tab.";
+  } else {
+    statusSelect.disabled = false;
+    statusSelect.title = "";
+  }
+
   openModal('asset-modal');
+  refreshIcons();
 }
 
 async function saveAsset() {
