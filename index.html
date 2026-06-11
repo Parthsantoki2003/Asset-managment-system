@@ -1991,13 +1991,14 @@ function renderStatusChart(d) {
 // ── EMPLOYEES ─────────────────────────────────────────────────────────────
 async function loadEmployees(page) {
   empState.page = page;
-  document.getElementById('emp-table-body').innerHTML = loadingRow(6);
+  setTableLoading('emp-table-body', 6); // 🌟 Use smooth dimming instead of wiping table
   try {
     const params = new URLSearchParams({ page, limit: 10 });
     if (empState.search) params.set('search', empState.search);
     const data = await api('GET', `/employees?${params}`);
     renderEmployeeTable(data);
   } catch (e) { toast(e.message, 'error'); }
+  finally { clearTableLoading('emp-table-body'); } // 🌟 Restore brightness
 }
 
 function renderEmployeeTable(data) {
@@ -2114,7 +2115,7 @@ document.getElementById('emp-search').addEventListener('input', e => {
 // ── ASSETS ────────────────────────────────────────────────────────────────
 async function loadAssets(page) {
   assetState.page = page;
-  document.getElementById('asset-table-body').innerHTML = loadingRow(7);
+  setTableLoading('asset-table-body', 7); // 🌟 Use smooth dimming instead of wiping table
   try {
     const params = new URLSearchParams({ page, limit: 10 });
     if (assetState.search) params.set('search',     assetState.search);
@@ -2123,6 +2124,7 @@ async function loadAssets(page) {
     const data = await api('GET', `/assets?${params}`);
     renderAssetTable(data);
   } catch (e) { toast(e.message, 'error'); }
+  finally { clearTableLoading('asset-table-body'); } // 🌟 Restore brightness
 }
 
 function renderAssetTable(data) {
