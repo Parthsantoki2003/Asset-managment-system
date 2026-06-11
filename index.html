@@ -1813,16 +1813,41 @@ function initApp() {
   document.getElementById('user-role-badge').textContent = currentUser.role;
 
   const isAdmin = currentUser.role === 'admin';
+  
   document.querySelectorAll('.admin-only').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
+
+  // Hide specific sidebar sections for Admin workflows
   document.getElementById('audit-section').style.display        = isAdmin ? '' : 'none';
   document.getElementById('audit-nav').style.display            = isAdmin ? '' : 'none';
   document.getElementById('admin-workflow-label').style.display = isAdmin ? '' : 'none';
   document.getElementById('approvals-nav').style.display        = isAdmin ? '' : 'none';
 
-  navigate('dashboard');
+  // 🌟 NEW: Hide Admin-only navigation links
+  const adminNavPages = ['dashboard', 'employees', 'assets', 'assignments'];
+  adminNavPages.forEach(page => {
+    const navLink = document.querySelector(`[data-page="${page}"]`);
+    if (navLink) {
+      navLink.style.display = isAdmin ? '' : 'none';
+    }
+  });
+
+  // 🌟 NEW: Hide the "Overview" and "Management" text labels in the sidebar
+  document.querySelectorAll('.sidebar-section-label').forEach(label => {
+    if (label.textContent === 'Overview' || label.textContent === 'Management') {
+      label.style.display = isAdmin ? '' : 'none';
+    }
+  });
+
+  // 🌟 NEW: Route the user to the correct landing page based on their role
+  if (isAdmin) {
+    navigate('dashboard');
+  } else {
+    navigate('profile');
+  }
 }
+
 
 // ── NAVIGATION ────────────────────────────────────────────────────────────
 const pageMeta = {
