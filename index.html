@@ -1080,6 +1080,9 @@ textarea.input { resize: vertical; min-height: 80px; }
       <button class="btn btn-primary w-full" style="justify-content:center;padding:11px;font-size:14px" onclick="doLogin()">
         <span id="login-btn-text">Sign In</span>
       </button>
+      <div class="auth-demo-hint">
+        <strong>Demo credentials:</strong> admin@demo.com / admin123
+      </div>
     </div>
 
     <div id="tab-register" style="display:none">
@@ -1357,6 +1360,7 @@ textarea.input { resize: vertical; min-height: 80px; }
             <option value="">All Entities</option>
             <option value="asset">Asset</option>
             <option value="employee">Employee</option>
+            <option value="user">User</option>
           </select>
           <select id="audit-action-filter" class="input" style="width:140px">
             <option value="">All Actions</option>
@@ -1365,8 +1369,9 @@ textarea.input { resize: vertical; min-height: 80px; }
             <option value="deleted">Deleted</option>
             <option value="assigned">Assigned</option>
             <option value="returned">Returned</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
           </select>
-          <button class="btn btn-outline btn-sm" onclick="loadAuditLogs(1)">Apply Filter</button>
         </div>
         <div class="table-wrap">
           <table>
@@ -1636,7 +1641,6 @@ function closeMobileSidebar() {
 }
 
 // ── UI HELPERS & ICONS ────────────────────────────────────────────────────
-// 🚀 NEW: Explicitly tells Lucide to render icons for newly injected HTML
 function refreshIcons() {
   if (window.lucide) {
     lucide.createIcons();
@@ -1863,7 +1867,7 @@ function renderDashStats(d) {
       <div class="stat-value">${c.value}</div>
     </div>
   `).join('');
-  refreshIcons(); // 🚀 Redraw new Lucide icons inside stat cards
+  refreshIcons(); 
 }
 
 function renderRecentAssignments(items) {
@@ -1952,7 +1956,7 @@ function renderEmployeeTable(data) {
     </tr>
   `).join('');
   renderPagination('emp-pagination', data.page, data.total_pages, p => loadEmployees(p));
-  refreshIcons(); // 🚀 Redraw injected Edit/Delete icons
+  refreshIcons(); 
 }
 
 function openEmpModal(emp = null) {
@@ -2014,11 +2018,11 @@ async function saveEmployee() {
 function confirmDeleteEmployee(id, name) {
   showConfirm(
     'trash-2', `Delete ${name}?`,
-    'This will permanently delete the employee record. This cannot be undone.',
+    'This will permanently archive the employee record.',
     async () => {
       try {
         await api('DELETE', `/employees/${id}`);
-        toast('Employee deleted.', 'info');
+        toast('Employee archived.', 'info');
         loadEmployees(empState.page);
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -2075,7 +2079,7 @@ function renderAssetTable(data) {
     </tr>
   `).join('');
   renderPagination('asset-pagination', data.page, data.total_pages, p => loadAssets(p));
-  refreshIcons(); // 🚀 Redraw injected Edit/Delete icons
+  refreshIcons(); 
 }
 
 function openAssetModal(asset = null) {
@@ -2143,11 +2147,11 @@ async function saveAsset() {
 function confirmDeleteAsset(id, name) {
   showConfirm(
     'trash-2', `Delete "${name}"?`,
-    'This will permanently delete the asset record.',
+    'This will permanently archive the asset record.',
     async () => {
       try {
         await api('DELETE', `/assets/${id}`);
-        toast('Asset deleted.', 'info');
+        toast('Asset archived.', 'info');
         loadAssets(assetState.page);
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -2211,7 +2215,7 @@ function renderActiveAssignments(data) {
     </tr>
   `).join('');
   renderPagination('assign-active-pagination', data.page, Math.ceil(data.total/10), p => loadActiveAssignments(p));
-  refreshIcons(); // 🚀 Redraw injected Return icons
+  refreshIcons();
 }
 
 async function loadAssignmentHistory(page) {
@@ -2242,6 +2246,7 @@ function renderAssignmentHistory(data) {
     </tr>
   `).join('');
   renderPagination('assign-hist-pagination', data.page, Math.ceil(data.total/10), p => loadAssignmentHistory(p));
+  refreshIcons();
 }
 
 async function openAssignModal() {
@@ -2371,6 +2376,10 @@ function renderAuditTable(data) {
   renderPagination('audit-pagination', data.page, Math.ceil(data.total/20), p => loadAuditLogs(p));
 }
 
+// Ensure Audit Filters fire immediately
+document.getElementById('audit-entity-filter').addEventListener('change', () => loadAuditLogs(1));
+document.getElementById('audit-action-filter').addEventListener('change', () => loadAuditLogs(1));
+
 // ── APPROVALS ─────────────────────────────────────────────────────────────
 async function loadPendingApprovals() {
   const tbody = document.getElementById('approvals-table-body');
@@ -2395,7 +2404,7 @@ async function loadPendingApprovals() {
         </td>
       </tr>
     `).join('');
-    refreshIcons(); // 🚀 Redraw injected Verify/Reject icons
+    refreshIcons(); 
   } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -2475,14 +2484,13 @@ document.addEventListener('keydown', e => {
 });
 
 function showConfirm(iconName, title, message, onConfirm) {
-  // Inject the dynamically requested Lucide icon into the confirm modal
   document.getElementById('confirm-icon').innerHTML      = `<i data-lucide="${iconName}" style="width:34px;height:34px;stroke:var(--warning);stroke-width:1.5"></i>`;
   document.getElementById('confirm-title').textContent   = title;
   document.getElementById('confirm-message').textContent = message;
   const btn = document.getElementById('confirm-ok-btn');
   btn.onclick = () => { closeModal('confirm-modal'); onConfirm(); };
   openModal('confirm-modal');
-  refreshIcons(); // 🚀 Force icon to render
+  refreshIcons(); 
 }
 
 function renderPagination(containerId, currentPg, totalPages, onPageClick) {
@@ -2531,7 +2539,6 @@ function loadingRow(cols) {
   return `<tr class="loading-row"><td colspan="${cols}"><div class="spinner"></div></td></tr>`;
 }
 function emptyRow(cols, msg) {
-  // Replaced emoji with proper Lucide inbox icon
   return `<tr><td colspan="${cols}"><div class="empty-state"><div class="empty-icon"><i data-lucide="inbox"></i></div><p>${msg}</p></div></td></tr>`;
 }
 
@@ -2551,7 +2558,7 @@ function fmtDateTime(d) {
   } else {
     document.getElementById('auth-wrapper').classList.add('active');
   }
-  refreshIcons(); // 🚀 Initial page load icon sweep
+  refreshIcons(); 
 })();
 </script>
 </body>
