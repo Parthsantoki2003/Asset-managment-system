@@ -1673,12 +1673,24 @@ function refreshIcons() {
   }
 }
 
-function isValidPastOrToday(dateString) {
+function isValidJoiningDate(dateString) {
   if (!dateString) return false;
+  
   const selectedDate = new Date(dateString);
+  selectedDate.setHours(0, 0, 0, 0);
+
   const today = new Date();
-  today.setHours(23, 59, 59, 999);
-  return selectedDate <= today;
+  today.setHours(0, 0, 0, 0);
+
+  // Calculate one month ago
+  const oneMonthAgo = new Date(today);
+  oneMonthAgo.setMonth(today.getMonth() - 1);
+
+  // Calculate one month in the future
+  const oneMonthFuture = new Date(today);
+  oneMonthFuture.setMonth(today.getMonth() + 1);
+
+  return selectedDate >= oneMonthAgo && selectedDate <= oneMonthFuture;
 }
 
 function isValidPurchaseDate(dateString) {
