@@ -1693,16 +1693,19 @@ function renderAuditTable(data) {
     document.getElementById('audit-pagination').innerHTML = '';
     return;
   }
-  const actionColors = { created:'success', updated:'info', deleted:'under_repair', assigned:'assigned', returned:'available' };
+  // Added extra colors for approved/rejected actions
+  const actionColors = { created:'success', updated:'info', deleted:'under_repair', assigned:'assigned', returned:'available', approved:'success', rejected:'error' };
+  
   tbody.innerHTML = data.data.map(l => `
     <tr>
       <td><span class="badge badge-${actionColors[l.action]||'available'}">${l.action}</span></td>
-      <td>${l.entity_type || '—'} #${l.entity_id || '—'}</td>
-      <td style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.details || '—'}</td>
-      <td>User #${l.performed_by || '—'}</td>
+      <td><span style="font-weight:600;text-transform:capitalize">${l.entity_type || '—'}</span> ${l.entity_id ? '#' + l.entity_id : ''}</td>
+      <td style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${l.details || ''}">${l.details || '—'}</td>
+      <td>${l.user ? l.user.email : `User #${l.performed_by || '—'}`}</td>
       <td>${fmtDateTime(l.created_at)}</td>
     </tr>
   `).join('');
+  
   renderPagination('audit-pagination', data.page, Math.ceil(data.total/20), p => loadAuditLogs(p));
 }
 
