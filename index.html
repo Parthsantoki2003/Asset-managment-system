@@ -1526,12 +1526,12 @@ textarea.input { resize: vertical; min-height: 80px; }
         </div>
       </div>
       <div class="form-group">
-        <label>Status</label>
-        <select id="asset-status" class="input">
-          <option value="available">Available</option>
-          <option value="under_repair">Under Repair</option>
-          <option value="retired">Retired</option>
-        </select>
+          <label>Status</label>
+          <select id="asset-status" class="input">
+            <option value="available">Available</option>
+            <option value="under_repair">Under Repair</option>
+            <option value="retired">Retired</option>
+          </select>
       </div>
       <div id="asset-modal-err" class="err-msg" style="display:none;margin-top:8px"></div>
     </div>
@@ -1673,6 +1673,26 @@ function refreshIcons() {
   }
 }
 
+// 🌟 RE-ADDED: Smooth Loading Helpers (These were missing!)
+function setTableLoading(tbodyId, cols) {
+  const tbody = document.getElementById(tbodyId);
+  if (!tbody) return;
+  if (tbody.children.length === 0 || tbody.innerHTML.includes('empty-state')) {
+    tbody.innerHTML = loadingRow(cols);
+  } else {
+    tbody.style.opacity = '0.4';
+    tbody.style.pointerEvents = 'none';
+    tbody.style.transition = 'opacity 0.2s ease';
+  }
+}
+
+function clearTableLoading(tbodyId) {
+  const tbody = document.getElementById(tbodyId);
+  if (!tbody) return;
+  tbody.style.opacity = '1';
+  tbody.style.pointerEvents = 'auto';
+}
+
 function isValidJoiningDate(dateString) {
   if (!dateString) return false;
   
@@ -1682,11 +1702,9 @@ function isValidJoiningDate(dateString) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // Calculate one month ago
   const oneMonthAgo = new Date(today);
   oneMonthAgo.setMonth(today.getMonth() - 1);
 
-  // Calculate one month in the future
   const oneMonthFuture = new Date(today);
   oneMonthFuture.setMonth(today.getMonth() + 1);
 
@@ -1715,9 +1733,8 @@ async function api(method, path, body = null) {
     }
   };
   if (body) opts.body = JSON.stringify(body);
-  const cacheBuster = method === 'GET' ? (path.includes('?') ? `&t=${Date.now()}` : `?t=${Date.now()}`) : '';
-  const finalUrl = `${API}${path}${cacheBuster}`;
-  const res = await fetch(finalUrl, opts);
+  const res = await fetch(`${API}${path}`, opts); // Removed the ?t= URL hack
+  
   if (res.status === 401) {
     if (path === '/auth/login') {
       const data = await res.json();
@@ -1782,9 +1799,8 @@ async function doLogin() {
   }
 }
 
-
 async function loadMyAssets() {
-  document.getElementById('myassets-table-body').innerHTML = loadingRow(4);
+  setTableLoading('myassets-table-body', 4);
   try {
     const data = await api('GET', '/my-assets');
     const tbody = document.getElementById('myassets-table-body');
@@ -1806,6 +1822,8 @@ async function loadMyAssets() {
     refreshIcons();
   } catch (e) {
     toast(e.message, 'error');
+  } finally {
+    clearTableLoading('myassets-table-body');
   }
 }
 
@@ -1858,19 +1876,16 @@ function initApp() {
 
   const isAdmin = currentUser.role === 'admin';
   
-  // 1. Hide/Show items marked with 'admin-only' CSS class
   document.querySelectorAll('.admin-only').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
 
-  // 2. Hide Admin-specific Navigation Links
   const adminNavPages = ['dashboard', 'employees', 'assets', 'assignments', 'approvals', 'auditlogs'];
   adminNavPages.forEach(page => {
     const navLink = document.querySelector(`[data-page="${page}"]`);
     if (navLink) navLink.style.display = isAdmin ? '' : 'none';
   });
 
-  // 3. Hide Admin-specific Sidebar Text Labels
   const adminLabels = ['Overview', 'Management', 'Workflows', 'Admin'];
   document.querySelectorAll('.sidebar-section-label').forEach(label => {
     if (adminLabels.includes(label.textContent)) {
@@ -1878,11 +1893,9 @@ function initApp() {
     }
   });
 
-  // 4. Show Employee-specific UI if the user is NOT an admin
   document.getElementById('employee-workspace-label').style.display = !isAdmin ? '' : 'none';
   document.getElementById('myassets-nav').style.display             = !isAdmin ? '' : 'none';
 
-  // 5. Smart Routing on Login
   if (isAdmin) {
     navigate('dashboard');
   } else {
@@ -1929,12 +1942,21 @@ function navigate(page) {
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────
 async function loadDashboard() {
+  const dash = document.getElementById('page-dashboard');
+  dash.style.opacity = '0.6';
+  dash.style.pointerEvents = 'none';
+  dash.style.transition = 'opacity 0.2s ease';
+  
   try {
     const data = await api('GET', '/dashboard/stats');
     renderDashStats(data);
     renderRecentAssignments(data.recent_assignments || []);
     renderStatusChart(data);
   } catch (e) { toast(e.message, 'error'); }
+  finally {
+    dash.style.opacity = '1';
+    dash.style.pointerEvents = 'auto';
+  }
 }
 
 function renderDashStats(d) {
@@ -2003,14 +2025,14 @@ function renderStatusChart(d) {
 // ── EMPLOYEES ─────────────────────────────────────────────────────────────
 async function loadEmployees(page) {
   empState.page = page;
-  setTableLoading('emp-table-body', 6); // 🌟 Use smooth dimming instead of wiping table
+  setTableLoading('emp-table-body', 6);
   try {
     const params = new URLSearchParams({ page, limit: 10 });
     if (empState.search) params.set('search', empState.search);
     const data = await api('GET', `/employees?${params}`);
     renderEmployeeTable(data);
   } catch (e) { toast(e.message, 'error'); }
-  finally { clearTableLoading('emp-table-body'); } // 🌟 Restore brightness
+  finally { clearTableLoading('emp-table-body'); }
 }
 
 function renderEmployeeTable(data) {
@@ -2084,8 +2106,9 @@ async function saveEmployee() {
     errEl.textContent = 'Joining Date is required.';
     errEl.style.display = 'block'; return;
   }
-  if (!isValidPastOrToday(body.joining_date)) {
-    errEl.textContent = 'Joining Date cannot be in the future.';
+  // 🌟 FIX 2: Updated validation call to match your new function name
+  if (!isValidJoiningDate(body.joining_date)) {
+    errEl.textContent = 'Joining Date must be within one month of today.';
     errEl.style.display = 'block'; return;
   }
   try {
@@ -2127,7 +2150,7 @@ document.getElementById('emp-search').addEventListener('input', e => {
 // ── ASSETS ────────────────────────────────────────────────────────────────
 async function loadAssets(page) {
   assetState.page = page;
-  setTableLoading('asset-table-body', 7); // 🌟 Use smooth dimming instead of wiping table
+  setTableLoading('asset-table-body', 7); 
   try {
     const params = new URLSearchParams({ page, limit: 10 });
     if (assetState.search) params.set('search',     assetState.search);
@@ -2136,7 +2159,7 @@ async function loadAssets(page) {
     const data = await api('GET', `/assets?${params}`);
     renderAssetTable(data);
   } catch (e) { toast(e.message, 'error'); }
-  finally { clearTableLoading('asset-table-body'); } // 🌟 Restore brightness
+  finally { clearTableLoading('asset-table-body'); } 
 }
 
 function renderAssetTable(data) {
@@ -2185,7 +2208,6 @@ function openAssetModal(asset = null) {
   document.getElementById('asset-modal-title').textContent = asset ? 'Edit Asset' : 'Add Asset';
   document.getElementById('asset-modal-err').style.display = 'none';
 
-  // 🌟 NEW: Lock the status field if the asset is currently assigned
   const statusSelect = document.getElementById('asset-status');
   if (asset && asset.status === 'assigned') {
     statusSelect.disabled = true;
@@ -2283,12 +2305,13 @@ function showAssignTab(tab) {
 
 async function loadActiveAssignments(page) {
   assignState.activePage = page;
-  document.getElementById('assign-active-body').innerHTML = loadingRow(7);
+  setTableLoading('assign-active-body', 7); 
   try {
     const data = await api('GET', `/assignments/active?page=${page}&limit=10`);
     document.getElementById('tab-active-btn').textContent = `Active (${data.total})`;
     renderActiveAssignments(data);
   } catch (e) { toast(e.message, 'error'); }
+  finally { clearTableLoading('assign-active-body'); }
 }
 
 function renderActiveAssignments(data) {
@@ -2322,11 +2345,12 @@ function renderActiveAssignments(data) {
 
 async function loadAssignmentHistory(page) {
   assignState.histPage = page;
-  document.getElementById('assign-hist-body').innerHTML = loadingRow(6);
+  setTableLoading('assign-hist-body', 6); 
   try {
     const data = await api('GET', `/assignments/history?page=${page}&limit=10`);
     renderAssignmentHistory(data);
   } catch (e) { toast(e.message, 'error'); }
+  finally { clearTableLoading('assign-hist-body'); }
 }
 
 function renderAssignmentHistory(data) {
@@ -2407,15 +2431,18 @@ function confirmReturn(assignmentId, assetName, empName) {
 
 // ── PROFILE ───────────────────────────────────────────────────────────────
 async function loadProfile() {
+  const profileInfo = document.getElementById('profile-info');
+  profileInfo.style.opacity = '0.4';
   try {
     const u = await api('GET', '/auth/me');
-    document.getElementById('profile-info').innerHTML = `
+    profileInfo.innerHTML = `
       <div class="detail-item"><label>Email</label><p>${u.email}</p></div>
       <div class="detail-item"><label>Role</label><p>${roleBadge(u.role)}</p></div>
       <div class="detail-item"><label>Account Status</label><p>${u.is_active ? '<span class="badge badge-available">Active</span>' : '<span class="badge badge-retired">Inactive</span>'}</p></div>
       <div class="detail-item"><label>Member Since</label><p>${fmtDate(u.created_at)}</p></div>
     `;
   } catch (e) { toast(e.message, 'error'); }
+  finally { profileInfo.style.opacity = '1'; }
 }
 
 async function updatePassword() {
@@ -2445,7 +2472,7 @@ async function updatePassword() {
 // ── AUDIT LOGS ────────────────────────────────────────────────────────────
 async function loadAuditLogs(page) {
   auditState.page = page;
-  document.getElementById('audit-table-body').innerHTML = loadingRow(5);
+  setTableLoading('audit-table-body', 5); 
   try {
     const entity = document.getElementById('audit-entity-filter').value;
     const action = document.getElementById('audit-action-filter').value;
@@ -2455,6 +2482,7 @@ async function loadAuditLogs(page) {
     const data = await api('GET', `/audit-logs?${params}`);
     renderAuditTable(data);
   } catch (e) { toast(e.message, 'error'); }
+  finally { clearTableLoading('audit-table-body'); }
 }
 
 function renderAuditTable(data) {
@@ -2478,22 +2506,20 @@ function renderAuditTable(data) {
   renderPagination('audit-pagination', data.page, Math.ceil(data.total/20), p => loadAuditLogs(p));
 }
 
-// Ensure Audit Filters fire immediately
 document.getElementById('audit-entity-filter').addEventListener('change', () => loadAuditLogs(1));
 document.getElementById('audit-action-filter').addEventListener('change', () => loadAuditLogs(1));
 
 // ── APPROVALS ─────────────────────────────────────────────────────────────
 async function loadPendingApprovals() {
-  const tbody = document.getElementById('approvals-table-body');
-  tbody.innerHTML = loadingRow(4);
+  setTableLoading('approvals-table-body', 4); 
   try {
     const data = await api('GET', '/admin/pending-users');
     if (!data.length) {
-      tbody.innerHTML = emptyRow(4, 'No pending registration requests found');
+      document.getElementById('approvals-table-body').innerHTML = emptyRow(4, 'No pending registration requests found');
       refreshIcons();
       return;
     }
-    tbody.innerHTML = data.map(u => `
+    document.getElementById('approvals-table-body').innerHTML = data.map(u => `
       <tr>
         <td><strong>${u.email}</strong></td>
         <td><span class="badge badge-employee">${u.role.toUpperCase()}</span></td>
@@ -2508,6 +2534,7 @@ async function loadPendingApprovals() {
     `).join('');
     refreshIcons(); 
   } catch (e) { toast(e.message, 'error'); }
+  finally { clearTableLoading('approvals-table-body'); }
 }
 
 function openApprovalModal(userId, role) {
@@ -2543,8 +2570,9 @@ async function submitApproval() {
     errEl.textContent = 'A Joining Date is required to approve an employee.';
     errEl.style.display = 'block'; return;
   }
-  if (!isValidPastOrToday(body.joining_date)) {
-    errEl.textContent = 'Joining Date cannot be in the future.';
+  // 🌟 FIX 2: Updated validation call to match your new function name
+  if (!isValidJoiningDate(body.joining_date)) {
+    errEl.textContent = 'Joining Date must be within one month of today.';
     errEl.style.display = 'block'; return;
   }
   try {
